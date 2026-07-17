@@ -24,6 +24,8 @@ func db_migrate(db) {
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS codes(code TEXT PRIMARY KEY, client_id TEXT, sub TEXT, redirect_uri TEXT, scope TEXT, nonce TEXT DEFAULT '', expires_at INTEGER)")
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS tokens(access_token TEXT PRIMARY KEY, sub TEXT, client_id TEXT, scope TEXT, expires_at INTEGER)")
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS ratelimit(k TEXT PRIMARY KEY, win INTEGER, n INTEGER)")
+    // open feedback intake (machin-feedback contract): idempotent on client id
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS feedback(id TEXT PRIMARY KEY, kind TEXT, message TEXT, context TEXT, reporter TEXT, version TEXT, created INTEGER, ip TEXT)")
 }
 
 // ---- helpers ----

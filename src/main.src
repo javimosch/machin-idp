@@ -1,6 +1,6 @@
 // machin-idp — CLI entry + routing.
 
-func app_version() (v) { v = "0.1.1" }
+func app_version() (v) { v = "0.1.2" }
 
 func resolve_port(a) (port) {
     p := opt(a, "-port", env("PORT"))
@@ -28,6 +28,8 @@ func main() {
         base := env("IDP_PUBLIC_URL")
         if base == "" { base = "http://localhost:8798" }
         println(guide_json(base))
+    } else if cmd == "feedback" {
+        cmd_feedback(a)
     } else if cmd == "version" {
         out_ok("{\"version\":\"" + app_version() + "\"}")
     } else if cmd == "help-json" {
