@@ -1,0 +1,66 @@
+// Operator CLI.
+
+func out_ok(data_json) { println("{\"ok\":true,\"data\":" + data_json + "}") }
+func fail(code, msg) { write(2, "{\"ok\":false,\"error\":" + json(msg) + ",\"code\":" + str(code) + "}\n")  exit(code) }
+
+func opt(a, name, def) (val) {
+    val = def
+    i := 0
+    while i < len(a) {
+        if a[i] == name && i + 1 < len(a) { val = a[i + 1] }
+        i = i + 1
+    }
+}
+
+func need_db() (db) {
+    db = db_open()
+    if db == 0 { fail(110, "cannot open database at " + db_path()) }
+    db_migrate(db)
+}
+
+func cmd_account_new(a) {
+    handle := opt(a, "-handle", "")
+    password := opt(a, "-password", "")
+    if handle == "" || len(password) < 8 { fail(80, "usage: account-new -handle x -password y(>=8) [-name z] [-kind agent|human]") }
+    kind := opt(a, "-kind", "agent")
+    db := need_db()
+    _, ex := account_by_handle(db, handle)
+    if ex == 1 { sqlite_close(db)  fail(90, "handle already exists") }
+    sub := "u_" + newid()
+    salt := to_hex(rand_bytes(16))
+    sqlite_exec(db, "INSERT INTO accounts(sub, handle, name, pass_hash, salt, kind, created_at) VALUES(?,?,?,?,?,?,?)", []string{sub, handle, opt(a, "-name", ""), hash_password(password, salt), salt, kind, str(now())})
+    sqlite_close(db)
+    out_ok("{\"sub\":\"" + sub + "\",\"handle\":" + json(handle) + "}")
+}
+
+func cmd_client_new(a) {
+    redirect := opt(a, "-redirect", "")
+    if redirect == "" { fail(80, "usage: client-new -name x -redirect https://cb") }
+    db := need_db()
+    cid := "cid_" + substr(newid(), 0, 16)
+    secret := "csec_" + newid()
+    sqlite_exec(db, "INSERT INTO clients(client_id, secret_hash, name, redirect_uris, created_at) VALUES(?,?,?,?,?)", []string{cid, tok_hash(secret), opt(a, "-name", ""), redirect, str(now())})
+    sqlite_close(db)
+    out_ok("{\"client_id\":\"" + cid + "\",\"client_secret\":\"" + secret + "\"}")
+}
+
+func cmd_accounts(a) {
+    db := need_db()
+    rows := sqlite_query(db, "SELECT sub, handle, name, kind, created_at FROM accounts ORDER BY created_at DESC LIMIT " + str(parse_int(opt(a, "-limit", "50"))), []string{})
+    sqlite_close(db)
+    out_ok(rows)
+}
+
+func cmd_clients(a) {
+    db := need_db()
+    rows := sqlite_query(db, "SELECT client_id, name, redirect_uris, created_at FROM clients ORDER BY created_at DESC LIMIT " + str(parse_int(opt(a, "-limit", "50"))), []string{})
+    sqlite_close(db)
+    out_ok(rows)
+}
+
+func cmd_stats() {
+    db := need_db()
+    rows := sqlite_query(db, "SELECT (SELECT COUNT(*) FROM accounts) AS accounts, (SELECT COUNT(*) FROM accounts WHERE kind='agent') AS agents, (SELECT COUNT(*) FROM clients) AS clients, (SELECT COUNT(*) FROM tokens) AS active_tokens", []string{})
+    sqlite_close(db)
+    out_ok(rows)
+}

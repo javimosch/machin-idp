@@ -1,0 +1,38 @@
+// machin-idp — CLI entry + routing.
+
+func app_version() (v) { v = "0.1.0" }
+
+func resolve_port(a) (port) {
+    p := opt(a, "-port", env("PORT"))
+    if p == "" { p = "8798" }
+    port = parse_int(p)
+}
+
+func main() {
+    a := args()
+    cmd := "help"
+    if len(a) > 1 { cmd = a[1] }
+    if cmd == "serve" {
+        run_server(resolve_port(a))
+    } else if cmd == "account-new" {
+        cmd_account_new(a)
+    } else if cmd == "client-new" {
+        cmd_client_new(a)
+    } else if cmd == "accounts" {
+        cmd_accounts(a)
+    } else if cmd == "clients" {
+        cmd_clients(a)
+    } else if cmd == "stats" {
+        cmd_stats()
+    } else if cmd == "guide" {
+        base := env("IDP_PUBLIC_URL")
+        if base == "" { base = "http://localhost:8798" }
+        println(guide_json(base))
+    } else if cmd == "version" {
+        out_ok("{\"version\":\"" + app_version() + "\"}")
+    } else if cmd == "help-json" {
+        println(help_json())
+    } else {
+        println(help_text())
+    }
+}

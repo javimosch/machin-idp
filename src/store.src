@@ -1,0 +1,166 @@
+// SQLite persistence + crypto helpers for machin-idp.
+
+func db_path() (p) {
+    p = env("IDP_DB")
+    if p == "" { p = env("HOME") + "/.machin-idp/data.db" }
+}
+
+func db_open() (db) {
+    p := db_path()
+    i := len(p) - 1
+    while i > 0 && substr(p, i, i + 1) != "/" { i = i - 1 }
+    if i > 0 { system("mkdir -p " + substr(p, 0, i)) }
+    db = sqlite_open(p)
+    if db == 0 { return }
+    sqlite_exec(db, "PRAGMA journal_mode=WAL")
+    sqlite_exec(db, "PRAGMA busy_timeout=5000")
+}
+
+func db_migrate(db) {
+    // a principal — human or agent; identified by handle (email-like), authed by password
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS accounts(sub TEXT PRIMARY KEY, handle TEXT UNIQUE, name TEXT DEFAULT '', pass_hash TEXT, salt TEXT, kind TEXT DEFAULT 'agent', created_at INTEGER)")
+    // an OIDC relying client (e.g. portier)
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS clients(client_id TEXT PRIMARY KEY, secret_hash TEXT, name TEXT DEFAULT '', redirect_uris TEXT DEFAULT '', created_at INTEGER)")
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS codes(code TEXT PRIMARY KEY, client_id TEXT, sub TEXT, redirect_uri TEXT, scope TEXT, nonce TEXT DEFAULT '', expires_at INTEGER)")
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS tokens(access_token TEXT PRIMARY KEY, sub TEXT, client_id TEXT, scope TEXT, expires_at INTEGER)")
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS ratelimit(k TEXT PRIMARY KEY, win INTEGER, n INTEGER)")
+}
+
+// ---- helpers ----
+
+func unq(s) (out) {
+    out = s
+    if len(s) >= 2 && has_prefix(s, "\"") && has_suffix(s, "\"") {
+        out = substr(s, 1, len(s) - 1)
+    }
+}
+
+func newid() (id) { id = to_hex(rand_bytes(16)) }
+func tok_hash(t) (h) { h = sha256(t) }
+
+func public_url(req) (u) {
+    u = env("IDP_PUBLIC_URL")
+    if u == "" { u = base_url(req) }
+}
+
+func rate_allow(db, key, secs, max) (allowed) {
+    win := now() / secs
+    sqlite_exec(db, "INSERT INTO ratelimit(k, win, n) VALUES(?,?,1) ON CONFLICT(k) DO UPDATE SET n = CASE WHEN win = " + str(win) + " THEN n + 1 ELSE 1 END, win = " + str(win), []string{key, str(win)})
+    rows := sqlite_query(db, "SELECT n FROM ratelimit WHERE k = ?", []string{key})
+    v, _ := json_get(rows, "[0].n")
+    allowed = parse_int(v) <= max
+}
+
+// ---- password hashing (pbkdf2-hmac-sha256) ----
+
+func hash_password(password, salt_hex) (h) {
+    dk := pbkdf2_sha256(bytes(password), from_hex(salt_hex), 60000, 32)
+    h = to_hex(dk)
+}
+
+func verify_password(password, salt_hex, expected_hex) (ok) {
+    ok = 0
+    if hash_password(password, salt_hex) == expected_hex { ok = 1 }
+}
+
+// ---- base64url (JWT) ----
+
+func b64url_bytes(b) (s) {
+    s = base64_encode_bytes(b)
+    s = replace(s, "+", "-")
+    s = replace(s, "/", "_")
+    s = replace(s, "=", "")
+}
+
+func b64url_str(str) (s) { s = b64url_bytes(bytes(str)) }
+
+// ---- Ed25519 signing key (JWT / JWKS) ----
+// Seed is IDP_ED25519_SEED (64 hex chars). A dev seed is used if unset (warned at boot).
+
+func signing_seed() (seed) {
+    h := env("IDP_ED25519_SEED")
+    if h == "" { h = "0000000000000000000000000000000000000000000000000000000000000001" }
+    seed = from_hex(h)
+}
+
+func signing_kid() (k) {
+    k = env("IDP_KID")
+    if k == "" { k = "idp-ed25519-1" }
+}
+
+// jwt_eddsa builds a compact EdDSA JWT from a claims JSON string.
+func jwt_eddsa(claims_json) (jwt) {
+    header := "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"" + signing_kid() + "\"}"
+    signing_input := b64url_str(header) + "." + b64url_str(claims_json)
+    sig := ed25519_sign(signing_seed(), bytes(signing_input))
+    jwt = signing_input + "." + b64url_bytes(sig)
+}
+
+// jwks_json is the public JWKS (OKP / Ed25519).
+func jwks_json() (j) {
+    pub := ed25519_pub(signing_seed())
+    j = "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"use\":\"sig\",\"alg\":\"EdDSA\",\"kid\":\"" + signing_kid() + "\",\"x\":\"" + b64url_bytes(pub) + "\"}]}"
+}
+
+// ---- rows ----
+
+type AccountRow struct {
+    sub       string
+    handle    string
+    name      string
+    pass_hash string
+    salt      string
+    kind      string
+}
+
+func account_cols() (c) {
+    c = "sub, handle, COALESCE(name,'') AS name, COALESCE(pass_hash,'') AS pass_hash, COALESCE(salt,'') AS salt, COALESCE(kind,'agent') AS kind"
+}
+
+func account_by_handle(db, handle) (a, ok) {
+    ok = 0
+    rows := sqlite_query(db, "SELECT " + account_cols() + " FROM accounts WHERE handle = ?", []string{handle})
+    list := parse(rows, []AccountRow{})
+    if len(list) > 0 { a = list[0]  ok = 1 }
+}
+
+func account_by_sub(db, sub) (a, ok) {
+    ok = 0
+    rows := sqlite_query(db, "SELECT " + account_cols() + " FROM accounts WHERE sub = ?", []string{sub})
+    list := parse(rows, []AccountRow{})
+    if len(list) > 0 { a = list[0]  ok = 1 }
+}
+
+type ClientRow struct {
+    client_id     string
+    secret_hash   string
+    name          string
+    redirect_uris string
+}
+
+func client_cols() (c) {
+    c = "client_id, COALESCE(secret_hash,'') AS secret_hash, COALESCE(name,'') AS name, COALESCE(redirect_uris,'') AS redirect_uris"
+}
+
+func client_by_id(db, cid) (c, ok) {
+    ok = 0
+    rows := sqlite_query(db, "SELECT " + client_cols() + " FROM clients WHERE client_id = ?", []string{cid})
+    list := parse(rows, []ClientRow{})
+    if len(list) > 0 { c = list[0]  ok = 1 }
+}
+
+type CodeRow struct {
+    client_id    string
+    sub          string
+    redirect_uri string
+    scope        string
+    nonce        string
+    expires_at   int
+}
+
+type TokenRow struct {
+    sub        string
+    client_id  string
+    scope      string
+    expires_at int
+}

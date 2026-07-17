@@ -1,0 +1,65 @@
+// Principal + client registration.
+//   POST /v1/accounts {handle, password, name?, kind?}   register a principal
+//   POST /v1/clients  {name, redirect_uris}              register an OIDC client
+
+func handle_account_create(req) (res) {
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    if rate_allow(db, "ac:" + client_ip(req), 3600, 30) == false {
+        sqlite_close(db)
+        res = response("429 Too Many Requests", "application/json", "{\"ok\":0,\"error\":\"too many registrations\"}")
+        return
+    }
+    hnv, hnerr := json_get(req.body, ".handle")
+    pwv, pwerr := json_get(req.body, ".password")
+    nmv, _ := json_get(req.body, ".name")
+    kdv, kderr := json_get(req.body, ".kind")
+    handle := unq(hnv)
+    password := unq(pwv)
+    name := unq(nmv)
+    kind := "agent"
+    if kderr == "" && (unq(kdv) == "human" || unq(kdv) == "agent") { kind = unq(kdv) }
+    if hnerr != "" || handle == "" || pwerr != "" || len(password) < 8 {
+        sqlite_close(db)
+        res = bad_request("{\"ok\":0,\"error\":\"handle and password (>=8 chars) required\"}")
+        return
+    }
+    _, exists := account_by_handle(db, handle)
+    if exists == 1 {
+        sqlite_close(db)
+        res = response("409 Conflict", "application/json", "{\"ok\":0,\"error\":\"handle already registered\"}")
+        return
+    }
+    sub := "u_" + newid()
+    salt := to_hex(rand_bytes(16))
+    ph := hash_password(password, salt)
+    sqlite_exec(db, "INSERT INTO accounts(sub, handle, name, pass_hash, salt, kind, created_at) VALUES(?,?,?,?,?,?,?)", []string{sub, handle, name, ph, salt, kind, str(now())})
+    sqlite_close(db)
+    write(2, "{\"event\":\"account_created\",\"sub\":\"" + sub + "\",\"kind\":\"" + kind + "\"}\n")
+    res = created("{\"ok\":1,\"sub\":\"" + sub + "\",\"handle\":" + json(handle) + ",\"kind\":\"" + kind + "\",\"note\":\"this principal can now log in via any app that offers 'Login with intrane'. Agents authenticate headlessly (Authorization: Basic handle:password on /authorize).\"}")
+}
+
+func handle_client_create(req) (res) {
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    if rate_allow(db, "cc:" + client_ip(req), 3600, 20) == false {
+        sqlite_close(db)
+        res = response("429 Too Many Requests", "application/json", "{\"ok\":0,\"error\":\"too many clients\"}")
+        return
+    }
+    nmv, _ := json_get(req.body, ".name")
+    ruv, ruerr := json_get(req.body, ".redirect_uris")
+    name := unq(nmv)
+    rus := ""
+    if ruerr == "" { rus = unq(ruv) }
+    if rus == "" {
+        sqlite_close(db)
+        res = bad_request("{\"ok\":0,\"error\":\"redirect_uris required (comma-separated; where the IdP sends the auth code)\"}")
+        return
+    }
+    cid := "cid_" + substr(newid(), 0, 16)
+    secret := "csec_" + newid()
+    sqlite_exec(db, "INSERT INTO clients(client_id, secret_hash, name, redirect_uris, created_at) VALUES(?,?,?,?,?)", []string{cid, tok_hash(secret), name, rus, str(now())})
+    sqlite_close(db)
+    res = created("{\"ok\":1,\"client_id\":\"" + cid + "\",\"client_secret\":\"" + secret + "\",\"note\":\"save the secret — shown once. Point your OIDC client (or portier kind=oidc) at " + public_url(req) + "/.well-known/openid-configuration\"}")
+}

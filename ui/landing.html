@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>machin-idp — Login with intrane, for humans and agents</title>
+<meta name="description" content="An OIDC identity provider for the agent era. Standards OIDC (EdDSA id_tokens, JWKS, discovery), headless login for agents, a form for humans. Apps offer 'Login with intrane'.">
+<style>
+:root{--bg:#0a0a0c;--panel:#101014;--line:#1f1f26;--fg:#e2e8f0;--dim:#8b93a3;--acc:#38bdf8}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.55}
+main{max-width:820px;margin:0 auto;padding:3rem 1.25rem}
+h1{font-size:2rem;margin:.2rem 0}h1 em{color:var(--acc);font-style:normal}
+h2{color:var(--acc);font-size:1.05rem;margin-top:2.4rem}
+p{color:var(--dim)}strong{color:var(--fg)}
+pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;overflow-x:auto;font-size:13px}
+.tag{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:2px 10px;font-size:12px;color:var(--dim);margin-right:6px}
+a{color:var(--acc)}footer{margin-top:3rem;color:var(--dim);font-size:12.5px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}@media(max-width:640px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:1rem}
+.card h3{margin:0 0 .4rem;color:var(--fg);font-size:.95rem}.card p{font-size:13px;margin:.3rem 0}
+</style>
+</head>
+<body>
+<main>
+<div><span class="tag">agent-first</span><span class="tag">standards OIDC</span><span class="tag">EdDSA id_tokens</span><span class="tag">headless login</span></div>
+<h1><em>machin-idp</em> — Login with intrane</h1>
+<p><strong>An identity provider for the agent era.</strong> A standards OIDC provider (discovery, JWKS, EdDSA-signed id_tokens) whose principals can be <strong>humans or agents</strong> — and whose login works <strong>headlessly</strong>, no browser UI required. Your apps offer "Login with intrane" instead of "Login with Google".</p>
+
+<pre># register a principal (an agent, here)
+curl -s -X POST https://idp.intrane.fr/v1/accounts \
+  -d '{"handle":"agent-7@example.com","password":"correct-horse-battery","kind":"agent"}'
+
+# headless login — no browser: HTTP Basic on /authorize returns the auth code
+curl -si "https://idp.intrane.fr/authorize?response_type=code&client_id=cid_…&redirect_uri=…&scope=openid%20email&state=x" \
+  -u 'agent-7@example.com:correct-horse-battery'
+# -&gt; 302 Location: …?code=ac_…</pre>
+
+<div class="grid">
+<div class="card"><h3>Humans and agents, one directory</h3><p>A human gets a minimal sign-in form; an agent sends Basic auth and skips it. Same OIDC code flow, same id_token.</p></div>
+<div class="card"><h3>Real OIDC, pure MFL</h3><p>Discovery, JWKS, and <strong>EdDSA (Ed25519)</strong> id_token signatures — asymmetric tokens any modern client verifies, no RSA, one static binary.</p></div>
+</div>
+
+<h2>plugs straight into portier</h2>
+<p>Register machin-idp as a generic OIDC provider in <a href="https://sso.intrane.fr">portier</a> and your apps get "Login with intrane" through the same broker they use for Google/GitHub. The full triad: <a href="https://peage.intrane.fr">péage</a> (pay), <a href="https://relais.intrane.fr">relais</a> (receive), portier (authenticate) — and now the identity behind it.</p>
+
+<h2>the interface is the docs</h2>
+<pre>curl -s https://idp.intrane.fr/llms.txt
+curl -s https://idp.intrane.fr/.well-known/openid-configuration</pre>
+
+<footer>machin-idp is a single static binary in <a href="https://github.com/javimosch/machin">machin (MFL)</a> — EdDSA JWTs, PBKDF2 passwords, no RSA, no runtime. An <a href="https://intrane.fr">intrane.fr</a> experiment. Contact: javi@intrane.fr</footer>
+</main>
+</body>
+</html>

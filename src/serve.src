@@ -1,0 +1,37 @@
+// HTTP routing.
+
+func pathof(req) (p) {
+    parts := split(req.path, "?")
+    p = parts[0]
+}
+
+func handle(req) (res) {
+    p := pathof(req)
+    if p == "/_health" { res = ok_json("{\"ok\":1,\"version\":\"" + app_version() + "\"}")  return }
+    if p == "/.well-known/openid-configuration" { res = handle_discovery(req)  return }
+    if p == "/jwks" || p == "/.well-known/jwks.json" { res = handle_jwks(req)  return }
+    if req.method == "POST" && p == "/v1/accounts" { res = handle_account_create(req)  return }
+    if req.method == "POST" && p == "/v1/clients" { res = handle_client_create(req)  return }
+    if req.method == "POST" && p == "/authorize/login" { res = handle_authorize_login(req)  return }
+    if p == "/authorize" { res = handle_authorize(req)  return }
+    if req.method == "POST" && p == "/token" { res = handle_token(req)  return }
+    if p == "/userinfo" { res = handle_userinfo(req)  return }
+    if p == "/llms.txt" { res = ok_text(llms_txt(public_url(req)))  return }
+    if p == "/guide" { res = ok_json(guide_json(public_url(req)))  return }
+    if p == "/" { res = ok_html(landing_html())  return }
+    res = not_found()
+}
+
+func run_server(port) {
+    db := db_open()
+    db_migrate(db)
+    sqlite_close(db)
+    set_trust_proxy(1)
+    set_secure_cookies(1)
+    set_access_log(1)
+    set_max_body(65536)
+    set_read_timeout(15000)
+    if env("IDP_ED25519_SEED") == "" { write(2, "{\"warn\":\"IDP_ED25519_SEED not set — id_tokens signed with a DEV key; set 64 hex chars in prod\"}\n") }
+    write(2, "{\"event\":\"listening\",\"port\":" + str(port) + "}\n")
+    serve(port, func(req) { return handle(req) })
+}

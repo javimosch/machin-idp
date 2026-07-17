@@ -1,0 +1,196 @@
+// OIDC provider endpoints. EdDSA-signed id_tokens (Ed25519); code flow.
+//   GET  /.well-known/openid-configuration   discovery
+//   GET  /jwks                               public keys (Ed25519 OKP)
+//   GET  /authorize                          login (headless Basic auth OR a form)
+//   POST /authorize/login                    the form's credential submit
+//   POST /token                              code -> {access_token, id_token}
+//   GET  /userinfo                           Bearer access_token -> claims
+
+func handle_discovery(req) (res) {
+    b := public_url(req)
+    res = ok_json("{\"issuer\":\"" + b + "\",\"authorization_endpoint\":\"" + b + "/authorize\",\"token_endpoint\":\"" + b + "/token\",\"userinfo_endpoint\":\"" + b + "/userinfo\",\"jwks_uri\":\"" + b + "/jwks\",\"response_types_supported\":[\"code\"],\"grant_types_supported\":[\"authorization_code\"],\"subject_types_supported\":[\"public\"],\"id_token_signing_alg_values_supported\":[\"EdDSA\"],\"scopes_supported\":[\"openid\",\"email\",\"profile\"],\"token_endpoint_auth_methods_supported\":[\"client_secret_basic\",\"client_secret_post\"],\"claims_supported\":[\"sub\",\"email\",\"name\"]}")
+}
+
+func handle_jwks(req) (res) { res = ok_json(jwks_json()) }
+
+// validate the authorize request; returns the client + resolved params or an error string.
+func authorize_params(db, req) (cid, redirect_uri, scope, state, nonce, err) {
+    err = ""
+    cid = query(req, "client_id")
+    redirect_uri = query(req, "redirect_uri")
+    scope = query(req, "scope")
+    state = query(req, "state")
+    nonce = query(req, "nonce")
+    rt := query(req, "response_type")
+    if rt != "code" { err = "response_type must be code"  return }
+    c, ok := client_by_id(db, cid)
+    if ok == 0 { err = "unknown client_id"  return }
+    okr := 0
+    for _, r := range split(c.redirect_uris, ",") {
+        if trim(r) == redirect_uri { okr = 1 }
+    }
+    if redirect_uri == "" || okr == 0 { err = "redirect_uri not registered for this client"  return }
+}
+
+// issue an auth code for sub and 302 to the client's redirect_uri.
+func issue_code_redirect(db, cid, sub, redirect_uri, scope, state, nonce) (res) {
+    code := "ac_" + newid()
+    sqlite_exec(db, "INSERT INTO codes(code, client_id, sub, redirect_uri, scope, nonce, expires_at) VALUES(?,?,?,?,?,?,?)", []string{code, cid, sub, redirect_uri, scope, nonce, str(now() + 600)})
+    sep := "?"
+    if index(redirect_uri, "?") >= 0 { sep = "&" }
+    dest := redirect_uri + sep + "code=" + url_encode(code)
+    if state != "" { dest = dest + "&state=" + url_encode(state) }
+    res = redirect(dest)
+}
+
+// GET /authorize — headless (Authorization: Basic handle:password) for agents, else a form.
+func handle_authorize(req) (res) {
+    db := db_open()
+    if db == 0 { res = html_error("db error")  return }
+    cid, redirect_uri, scope, state, nonce, err := authorize_params(db, req)
+    if err != "" { sqlite_close(db)  res = html_error(err)  return }
+
+    // headless agent path: HTTP Basic with the principal's handle:password
+    auth := header(req, "authorization")
+    if has_prefix(to_lower(auth), "basic ") {
+        dec := base64_decode(trim(substr(auth, 6, len(auth))))
+        ci := index(dec, ":")
+        if ci > 0 {
+            handle := substr(dec, 0, ci)
+            password := substr(dec, ci + 1, len(dec))
+            a, aok := account_by_handle(db, handle)
+            if aok == 1 && verify_password(password, a.salt, a.pass_hash) == 1 {
+                r := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce)
+                sqlite_close(db)
+                res = r
+                return
+            }
+        }
+        sqlite_close(db)
+        res = response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"invalid credentials\"}")
+        return
+    }
+    sqlite_close(db)
+    // human path: a minimal login form that re-submits the oidc params
+    res = ok_html(login_form(public_url(req), cid, redirect_uri, scope, state, nonce))
+}
+
+// POST /authorize/login — the form submit (form-encoded handle/password + oidc params).
+func handle_authorize_login(req) (res) {
+    db := db_open()
+    if db == 0 { res = html_error("db error")  return }
+    handle := form_field(req.body, "handle")
+    password := form_field(req.body, "password")
+    cid := form_field(req.body, "client_id")
+    redirect_uri := form_field(req.body, "redirect_uri")
+    scope := form_field(req.body, "scope")
+    state := form_field(req.body, "state")
+    nonce := form_field(req.body, "nonce")
+    c, cok := client_by_id(db, cid)
+    okr := 0
+    if cok == 1 {
+        for _, r := range split(c.redirect_uris, ",") { if trim(r) == redirect_uri { okr = 1 } }
+    }
+    if okr == 0 { sqlite_close(db)  res = html_error("invalid client/redirect")  return }
+    a, aok := account_by_handle(db, handle)
+    if aok == 0 || verify_password(password, a.salt, a.pass_hash) == 0 {
+        sqlite_close(db)
+        res = ok_html(login_form_err(public_url(req), cid, redirect_uri, scope, state, nonce))
+        return
+    }
+    rr := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce)
+    sqlite_close(db)
+    res = rr
+}
+
+// POST /token — client-authenticated code exchange -> access_token + EdDSA id_token.
+func handle_token(req) (res) {
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"error\":\"server_error\"}")  return }
+    // client auth: Basic or client_id/client_secret in the form body
+    cid := ""
+    csec := ""
+    auth := header(req, "authorization")
+    if has_prefix(to_lower(auth), "basic ") {
+        dec := base64_decode(trim(substr(auth, 6, len(auth))))
+        ci := index(dec, ":")
+        if ci > 0 { cid = substr(dec, 0, ci)  csec = substr(dec, ci + 1, len(dec)) }
+    }
+    if cid == "" { cid = form_field(req.body, "client_id")  csec = form_field(req.body, "client_secret") }
+    c, cok := client_by_id(db, cid)
+    if cok == 0 || c.secret_hash != tok_hash(csec) {
+        sqlite_close(db)
+        res = response("401 Unauthorized", "application/json", "{\"error\":\"invalid_client\"}")
+        return
+    }
+    code := form_field(req.body, "code")
+    rows := sqlite_query(db, "SELECT client_id, sub, redirect_uri, scope, nonce, expires_at FROM codes WHERE code = ?", []string{code})
+    list := parse(rows, []CodeRow{})
+    if len(list) == 0 { sqlite_close(db)  res = bad_request("{\"error\":\"invalid_grant\"}")  return }
+    cr := list[0]
+    sqlite_exec(db, "DELETE FROM codes WHERE code = ?", []string{code})   // one-time
+    if cr.client_id != cid || now() > cr.expires_at {
+        sqlite_close(db)
+        res = bad_request("{\"error\":\"invalid_grant\"}")
+        return
+    }
+    a, aok := account_by_sub(db, cr.sub)
+    if aok == 0 { sqlite_close(db)  res = bad_request("{\"error\":\"invalid_grant\"}")  return }
+
+    at := "at_" + newid()
+    sqlite_exec(db, "INSERT INTO tokens(access_token, sub, client_id, scope, expires_at) VALUES(?,?,?,?,?)", []string{at, a.sub, cid, cr.scope, str(now() + 3600)})
+    sqlite_close(db)
+
+    iss := public_url(req)
+    n := now()
+    claims := "{\"iss\":" + json(iss) + ",\"sub\":\"" + a.sub + "\",\"aud\":\"" + cid + "\",\"iat\":" + str(n) + ",\"exp\":" + str(n + 3600) + ",\"email\":" + json(a.handle) + ",\"name\":" + json(a.name)
+    if cr.nonce != "" { claims = claims + ",\"nonce\":" + json(cr.nonce) }
+    claims = claims + "}"
+    idt := jwt_eddsa(claims)
+    res = ok_json("{\"access_token\":\"" + at + "\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":" + json(cr.scope) + ",\"id_token\":\"" + idt + "\"}")
+}
+
+// GET /userinfo — Bearer access_token -> claims.
+func handle_userinfo(req) (res) {
+    at := header(req, "authorization")
+    if has_prefix(to_lower(at), "bearer ") { at = trim(substr(at, 7, len(at))) } else { at = "" }
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"error\":\"server_error\"}")  return }
+    rows := sqlite_query(db, "SELECT sub, client_id, scope, expires_at FROM tokens WHERE access_token = ?", []string{at})
+    list := parse(rows, []TokenRow{})
+    if len(list) == 0 { sqlite_close(db)  res = response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}")  return }
+    tr := list[0]
+    if now() > tr.expires_at { sqlite_close(db)  res = response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}")  return }
+    a, aok := account_by_sub(db, tr.sub)
+    sqlite_close(db)
+    if aok == 0 { res = response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}")  return }
+    res = ok_json("{\"sub\":\"" + a.sub + "\",\"email\":" + json(a.handle) + ",\"name\":" + json(a.name) + ",\"kind\":\"" + a.kind + "\"}")
+}
+
+// ---- small helpers ----
+
+func html_error(msg) (res) {
+    res = response("400 Bad Request", "text/html; charset=utf-8", "<!doctype html><meta charset=utf-8><body style=\"font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;padding:2rem\"><h2 style=\"color:#f87171\">machin-idp: " + msg + "</h2></body>")
+}
+
+// form_field extracts a value from an application/x-www-form-urlencoded body.
+func form_field(body, name) (v) {
+    v = ""
+    for _, part := range split(body, "&") {
+        eq := index(part, "=")
+        if eq > 0 {
+            if substr(part, 0, eq) == name { v = url_decode(substr(part, eq + 1, len(part))) }
+        }
+    }
+}
+
+func login_form(base, cid, redirect_uri, scope, state, nonce) (h) {
+    h = login_form_msg(base, cid, redirect_uri, scope, state, nonce, "")
+}
+func login_form_err(base, cid, redirect_uri, scope, state, nonce) (h) {
+    h = login_form_msg(base, cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">invalid credentials</p>")
+}
+func login_form_msg(base, cid, redirect_uri, scope, state, nonce, msg) (h) {
+    hid := "<input type=hidden name=client_id value=\"" + cid + "\"><input type=hidden name=redirect_uri value=\"" + redirect_uri + "\"><input type=hidden name=scope value=\"" + scope + "\"><input type=hidden name=state value=\"" + state + "\"><input type=hidden name=nonce value=\"" + nonce + "\">"
+    h = "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Sign in — intrane</title><style>body{font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;display:grid;place-items:center;min-height:100vh;margin:0}form{max-width:320px;width:90%}input[type=text],input[type=password]{width:100%;box-sizing:border-box;background:#101014;border:1px solid #1f1f26;border-radius:8px;color:#e2e8f0;padding:10px;margin:6px 0;font-family:inherit}button{width:100%;background:#38bdf8;color:#000;border:0;border-radius:8px;padding:10px;font-weight:600;cursor:pointer;margin-top:8px}h1{font-size:1.2rem}small{color:#8b93a3}</style></head><body><form method=post action=\"" + base + "/authorize/login\"><h1>Sign in with intrane</h1>" + msg + "<input type=text name=handle placeholder=\"handle / email\" autofocus><input type=password name=password placeholder=\"password\">" + hid + "<button>Continue</button><p><small>Agents: send Authorization: Basic on /authorize to skip this form.</small></p></form></body></html>"
+}
