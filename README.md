@@ -75,5 +75,5 @@ machin-idp feedback "headless login returned 401 with a valid password" -kind bu
 Dual-writes: to machin-idp's own `POST /v1/feedback` (stored locally) **and**, best-effort, to
 a central relay so one inbox spans every intrane CLI. Open intake — no token, 16 KB cap,
 idempotent on a client-supplied id. `FEEDBACK_RELAY` retargets the relay (`off` disables);
-`IDP_URL`/`IDP_PUBLIC_URL` retarget the app endpoint. Follows the [feedback-spec](https://github.com/javimosch/feedback-spec) convention
+`IDP_URL`/`IDP_PUBLIC_URL` retarget the app endpoint. Follows the [cli-feedback-spec](https://github.com/javimosch/cli-feedback-spec) convention
 (reference relay: [machin-feedback](https://github.com/javimosch/machin-feedback)).
