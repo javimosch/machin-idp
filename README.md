@@ -65,3 +65,15 @@ prod, back it up) · `IDP_KID`.
 
 v1 is an OIDC provider (authorization-code flow). Passwords are PBKDF2-HMAC-SHA256.
 SAML federation and RS256 are out of scope (machin has no RSA — see [machin#484](https://github.com/javimosch/machin/issues/484)); EdDSA covers OIDC fully.
+
+## Feedback
+
+```sh
+machin-idp feedback "headless login returned 401 with a valid password" -kind bug -context "agent principal, Basic auth on /authorize"
+```
+
+Dual-writes: to machin-idp's own `POST /v1/feedback` (stored locally) **and**, best-effort, to
+a central relay so one inbox spans every intrane CLI. Open intake — no token, 16 KB cap,
+idempotent on a client-supplied id. `FEEDBACK_RELAY` retargets the relay (`off` disables);
+`IDP_URL`/`IDP_PUBLIC_URL` retarget the app endpoint. Follows the
+[machin-feedback](https://github.com/javimosch/machin-feedback) convention.
