@@ -103,6 +103,48 @@ func handle_authorize_login(req) (res) {
     res = rr
 }
 
+// POST /authorize/signup — the signup form submit: free self-registration during "Login with
+// intrane", then straight into the OIDC redirect (so a brand-new member completes `hart join` in
+// one go). Same open policy as POST /v1/accounts (rate-limited).
+func handle_authorize_signup(req) (res) {
+    db := db_open()
+    if db == 0 { res = html_error("db error")  return }
+    if rate_allow(db, "su:" + client_ip(req), 3600, 30) == false { sqlite_close(db)  res = html_error("too many sign-ups — try again later")  return }
+    handle := form_field(req.body, "handle")
+    password := form_field(req.body, "password")
+    name := form_field(req.body, "name")
+    cid := form_field(req.body, "client_id")
+    redirect_uri := form_field(req.body, "redirect_uri")
+    scope := form_field(req.body, "scope")
+    state := form_field(req.body, "state")
+    nonce := form_field(req.body, "nonce")
+    c, cok := client_by_id(db, cid)
+    okr := 0
+    if cok == 1 {
+        for _, r := range split(c.redirect_uris, ",") { if trim(r) == redirect_uri { okr = 1 } }
+    }
+    if okr == 0 { sqlite_close(db)  res = html_error("invalid client/redirect")  return }
+    if handle == "" || len(password) < 8 {
+        sqlite_close(db)
+        res = ok_html(login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">handle and password (min 8 chars) required</p>"))
+        return
+    }
+    _, exists := account_by_handle(db, handle)
+    if exists == 1 {
+        sqlite_close(db)
+        res = ok_html(login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">that handle is taken — sign in instead</p>"))
+        return
+    }
+    sub := "u_" + newid()
+    salt := to_hex(rand_bytes(16))
+    ph := hash_password(password, salt)
+    sqlite_exec(db, "INSERT INTO accounts(sub, handle, name, pass_hash, salt, kind, created_at) VALUES(?,?,?,?,?,?,?)", []string{sub, handle, name, ph, salt, "human", str(now())})
+    write(2, "{\"event\":\"account_created\",\"via\":\"signup\",\"sub\":\"" + sub + "\"}\n")
+    rr := issue_code_redirect(db, cid, sub, redirect_uri, scope, state, nonce)
+    sqlite_close(db)
+    res = rr
+}
+
 // POST /token — client-authenticated code exchange -> access_token + EdDSA id_token.
 func handle_token(req) (res) {
     db := db_open()
@@ -192,5 +234,5 @@ func login_form_err(base, cid, redirect_uri, scope, state, nonce) (h) {
 }
 func login_form_msg(base, cid, redirect_uri, scope, state, nonce, msg) (h) {
     hid := "<input type=hidden name=client_id value=\"" + cid + "\"><input type=hidden name=redirect_uri value=\"" + redirect_uri + "\"><input type=hidden name=scope value=\"" + scope + "\"><input type=hidden name=state value=\"" + state + "\"><input type=hidden name=nonce value=\"" + nonce + "\">"
-    h = "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Sign in — intrane</title><style>body{font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;display:grid;place-items:center;min-height:100vh;margin:0}form{max-width:320px;width:90%}input[type=text],input[type=password]{width:100%;box-sizing:border-box;background:#101014;border:1px solid #1f1f26;border-radius:8px;color:#e2e8f0;padding:10px;margin:6px 0;font-family:inherit}button{width:100%;background:#38bdf8;color:#000;border:0;border-radius:8px;padding:10px;font-weight:600;cursor:pointer;margin-top:8px}h1{font-size:1.2rem}small{color:#8b93a3}</style></head><body><form method=post action=\"" + base + "/authorize/login\"><h1>Sign in with intrane</h1>" + msg + "<input type=text name=handle placeholder=\"handle / email\" autofocus><input type=password name=password placeholder=\"password\">" + hid + "<button>Continue</button><p><small>Agents: send Authorization: Basic on /authorize to skip this form.</small></p></form></body></html>"
+    h = "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Sign in — intrane</title><style>body{font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;display:grid;place-items:center;min-height:100vh;margin:0}form{max-width:320px;width:90%}input[type=text],input[type=password]{width:100%;box-sizing:border-box;background:#101014;border:1px solid #1f1f26;border-radius:8px;color:#e2e8f0;padding:10px;margin:6px 0;font-family:inherit}button{width:100%;background:#38bdf8;color:#000;border:0;border-radius:8px;padding:10px;font-weight:600;cursor:pointer;margin-top:8px}h1{font-size:1.2rem}small{color:#8b93a3}</style></head><body><form method=post action=\"" + base + "/authorize/login\"><h1>Sign in with intrane</h1>" + msg + "<input type=text name=handle placeholder=\"handle / email\" autofocus><input type=password name=password placeholder=\"password\">" + hid + "<button>Continue</button></form><hr style=\"border-color:#1f1f26;margin:18px 0\"><form method=post action=\"" + base + "/authorize/signup\"><h1 style=\"font-size:1rem\">New here? Create an account</h1><input type=text name=handle placeholder=\"email\"><input type=password name=password placeholder=\"password (min 8 chars)\"><input type=text name=name placeholder=\"name (optional)\">" + hid + "<button>Create account &amp; continue</button></form><p><small>Agents: send Authorization: Basic on /authorize to skip this form.</small></p></body></html>"
 }

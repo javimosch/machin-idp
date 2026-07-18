@@ -13,6 +13,7 @@ func handle(req) (res) {
     if req.method == "POST" && p == "/v1/accounts" { res = handle_account_create(req)  return }
     if req.method == "POST" && p == "/v1/clients" { res = handle_client_create(req)  return }
     if req.method == "POST" && p == "/authorize/login" { res = handle_authorize_login(req)  return }
+    if req.method == "POST" && p == "/authorize/signup" { res = handle_authorize_signup(req)  return }
     if p == "/authorize" { res = handle_authorize(req)  return }
     if req.method == "POST" && p == "/token" { res = handle_token(req)  return }
     if req.method == "POST" && p == "/v1/feedback" { res = handle_feedback(req)  return }
