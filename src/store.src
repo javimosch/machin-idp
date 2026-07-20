@@ -14,6 +14,7 @@ func db_open() (db) {
     if db == 0 { return }
     sqlite_exec(db, "PRAGMA journal_mode=WAL")
     sqlite_exec(db, "PRAGMA busy_timeout=5000")
+    db_migrate(db)
 }
 
 func db_migrate(db) {

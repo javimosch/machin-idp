@@ -15,8 +15,8 @@ export IDP_ED25519_SEED="1111111111111111111111111111111111111111111111111111111
 ./machin-idp serve -port $PORT 2>/dev/null &
 SRV=$!
 trap 'kill $SRV 2>/dev/null || true' EXIT
-sleep 0.6
 B="http://127.0.0.1:$PORT"
+for _ in $(seq 1 50); do curl -sf "$B/_health" >/dev/null 2>&1 && break; sleep 0.1; done
 J(){ python3 -c "import json,sys;d=json.load(sys.stdin);print(d$1)"; }
 fail(){ echo "FAIL: $1"; exit 1; }
 P=0; ok(){ P=$((P+1)); echo "ok $P - $1"; }
@@ -173,12 +173,21 @@ LOC2=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-
 CODE2=$(echo "$LOC2" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
 [ -n "$CODE2" ] || fail code2
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE2&redirect_uri=http%3A%2F%2Fevil.com%2Fcb")" = "400" ] || fail redirmismatch; ok "redirect_uri mismatch -> invalid_grant"
+# omit redirect_uri at token exchange -> invalid_grant (OAuth exact-match)
+LOC2B=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=missredir")
+CODE2B=$(echo "$LOC2B" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE2B" ] || fail code2b
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE2B")" = "400" ] || fail missredir; ok "missing redirect_uri at token -> invalid_grant"
+# empty / unknown code -> invalid_grant
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "400" ] || fail emptycode; ok "empty auth code -> invalid_grant"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=ac_nope&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "400" ] || fail unkcode; ok "unknown auth code -> invalid_grant"
 
 # client_secret_post (no Basic) on /token
 LOC3=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=postauth")
 CODE3=$(echo "$LOC3" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
 TOK3=$(curl -sf -X POST "$B/token" -d "grant_type=authorization_code&code=$CODE3&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&client_id=$CID&client_secret=$CSEC")
 [ -n "$(echo "$TOK3" | J "['access_token']")" ] || fail secretpost; ok "token exchange via client_secret_post"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -d "grant_type=authorization_code&code=$CODE3&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&client_id=$CID&client_secret=wrong")" = "401" ] || fail secretpostbad; ok "client_secret_post wrong secret -> 401"
 
 # code issued to client A, exchange with client B -> invalid_grant
 C_B=$(curl -sf -X POST "$B/v1/clients" -d '{"name":"otherapp","redirect_uris":"http://127.0.0.1:9999/cb"}')
@@ -204,6 +213,8 @@ UI=$(curl -sf "$B/userinfo" -H "Authorization: Bearer $AT")
 [ "$(echo "$UI" | J "['sub']")" = "$SUB" ] || fail uisub; ok "userinfo sub matches"
 # bad token -> 401
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$B/userinfo" -H "Authorization: Bearer at_nope")" = "401" ] || fail uitoken; ok "bad access_token -> 401"
+# missing Authorization -> 401
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$B/userinfo")" = "401" ] || fail uinoauth; ok "userinfo without Authorization -> 401"
 # expired access_token -> 401
 sqlite3 "$DB" "UPDATE tokens SET expires_at=1 WHERE access_token='$AT'"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$B/userinfo" -H "Authorization: Bearer $AT")" = "401" ] || fail atexp; ok "expired access_token -> 401"
@@ -216,6 +227,11 @@ FORM_BAD=$(curl -s -o /tmp/form_bad_body -w '%{http_code}' -X POST "$B/authorize
 [ "$FORM_BAD" = "200" ] || fail formbadcode
 grep -qi 'invalid credentials' /tmp/form_bad_body || fail formbadmsg; ok "form login wrong password -> error form, no code"
 ! grep -q 'code=ac_' /tmp/form_bad_body || fail formbadleak; ok "form login wrong password does not leak code"
+# form login unknown handle -> same error shape (no enumeration)
+FORM_UNK=$(curl -s -o /tmp/form_unk_body -w '%{http_code}' -X POST "$B/authorize/login" --data-urlencode "handle=nobody@example.com" --data-urlencode "password=whatever" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formunk" --data-urlencode "nonce=n2u")
+[ "$FORM_UNK" = "200" ] || fail formunkcode
+grep -qi 'invalid credentials' /tmp/form_unk_body || fail formunkmsg; ok "form login unknown handle -> error form, no code"
+! grep -qi 'unknown\|not found\|no such' /tmp/form_unk_body || fail formunkleak; ok "form login unknown handle does not leak existence"
 # form login rate limit: 61 failed attempts -> 429
 for i in $(seq 1 60); do curl -s -o /dev/null -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=wrong-$i" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formrl$i"; done
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=wrong-61" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formrl61")" = "429" ] || fail formratelimit; ok "61st failed form login -> 429"
@@ -245,8 +261,8 @@ export IDP_DB="$DB2" IDP_PUBLIC_URL="http://127.0.0.1:$PORT2" IDP_KID="custom-ki
 ./machin-idp serve -port $PORT2 2>/dev/null &
 SRV2=$!
 trap 'kill $SRV2 2>/dev/null || true; kill $SRV 2>/dev/null || true' EXIT
-sleep 0.6
 B2="http://127.0.0.1:$PORT2"
+for _ in $(seq 1 50); do curl -sf "$B2/_health" >/dev/null 2>&1 && break; sleep 0.1; done
 JW2=$(curl -sf "$B2/jwks")
 [ "$(echo "$JW2" | J "['keys'][0]['kid']")" = "custom-kid-42" ] || fail kidjwks; ok "custom IDP_KID in JWKS"
 C2=$(curl -sf -X POST "$B2/v1/clients" -d '{"name":"kidtest","redirect_uris":"http://127.0.0.1:9998/cb"}')
