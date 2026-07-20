@@ -119,13 +119,14 @@ distinguish browser users from headless agents.
 - Redirect URIs: exact match per client (open-redirect guard).
 - Headless Basic failures: rate-limited per IP (60/min); `401` with `WWW-Authenticate: Basic realm="intrane"`, then `429` when exceeded.
 - Form login failures: same rate limit per IP (60/min); `429` with an error form when exceeded.
+- Token endpoint client auth failures: rate-limited per IP (60/min); `401 invalid_client`, then `429 too_many_requests`.
 - **`IDP_ED25519_SEED`**: 64 hex chars, irreplaceable — back up with the DB (see [deploy.md](deploy.md)).
 - **`IDP_KID`**: optional JWT/JWKS key id (default `idp-ed25519-1`); must be alphanumeric plus `.`, `_`, `-` — quotes or JSON metacharacters abort boot.
 
 ## 7. Local smoke test
 
 ```sh
-./build.sh && ./test.sh   # 74 assertions incl. portier-relevant OIDC checks
+./build.sh && ./test.sh   # 83 assertions incl. portier-relevant OIDC checks
 ```
 
 ## 8. Troubleshooting (portier + machin-idp)
@@ -136,6 +137,7 @@ distinguish browser users from headless agents.
 | `invalid_grant` at `/token` | `redirect_uri` mismatch or omitted | The `redirect_uri` in the token request must **exact match** the one used in `/authorize`; omitting it also returns `invalid_grant` |
 | Headless agent gets `401` | Wrong Basic credentials or unknown handle | Use `Authorization: Basic` with `handle:password`; failures return `401` + `WWW-Authenticate: Basic realm="intrane"` (same shape for unknown handles — no enumeration). An empty `Authorization: Basic` header (no credentials) also returns `401`, not the browser form. |
 | Headless agent gets `429` | Rate limit (60 failed Basic attempts/min per IP) | Wait one minute or use correct credentials (success path is not rate-limited) |
+| `/token` returns `429 too_many_requests` | Rate limit (60 failed client auth attempts/min per IP) | Wait one minute; valid client credentials still work after the window |
 | Form login loops with "invalid credentials" | Wrong password or rate limit (60/min per IP) | Same rate-limit window as headless Basic; check password and wait if throttled |
 | `unknown client_id` | Client not registered on machin-idp | `POST /v1/clients` with the exact callback URL portier uses |
 | Discovery/JWKS 404 | Wrong base URL | Use `IDP_PUBLIC_URL` / issuer exactly (e.g. `https://idp.intrane.fr`) |

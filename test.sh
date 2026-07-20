@@ -29,6 +29,8 @@ D=$(curl -sf "$B/.well-known/openid-configuration")
 [ "$(echo "$D" | J "['issuer']")" = "$B" ] || fail iss; ok "discovery issuer"
 JW=$(curl -sf "$B/jwks")
 [ "$(echo "$JW" | J "['keys'][0]['crv']")" = "Ed25519" ] || fail jwks; ok "jwks exposes Ed25519 OKP key"
+[ "$(echo "$JW" | J "['keys'][0]['use']")" = "sig" ] || fail jwksuse; ok "jwks key use=sig"
+[ "$(echo "$JW" | J "['keys'][0]['alg']")" = "EdDSA" ] || fail jwksalg; ok "jwks key alg=EdDSA"
 [ "$(curl -sf "$B/.well-known/jwks.json" | J "['keys'][0]['kty']")" = "OKP" ] || fail jwksalt; ok "alternate jwks path /.well-known/jwks.json"
 
 # register a principal (agent) + a client
@@ -46,6 +48,10 @@ AUTHQ="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9
 LOC=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ")
 echo "$LOC" | grep -q "127.0.0.1:9999/cb?code=ac_" || fail headless; ok "headless agent login -> code"
 echo "$LOC" | grep -q "state=xyz" || fail hstate; ok "state preserved"
+# Basic scheme is case-insensitive (RFC 7617)
+BASIC_UPPER="BASIC $(printf 'agent7@example.com:correct-horse-battery' | base64 -w0)"
+LOC_UPPER=$(curl -s -o /dev/null -w '%{redirect_url}' -H "Authorization: $BASIC_UPPER" "$B/authorize?$AUTHQ&state=upperbasic")
+echo "$LOC_UPPER" | grep -q "code=ac_" || fail basicupper; ok "Basic scheme case-insensitive (BASIC)"
 CODE=$(echo "$LOC" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
 # wrong password -> 401 + WWW-Authenticate
 BADPW=$(curl -s -D - -o /dev/null -u 'agent7@example.com:wrong' "$B/authorize?$AUTHQ")
@@ -91,6 +97,16 @@ IDT=$(echo "$TOK" | J "['id_token']")
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "400" ] || fail onetime; ok "auth code is one-time"
 # wrong client secret -> 401
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:wrong" -d "grant_type=authorization_code&code=x&redirect_uri=y")" = "401" ] || fail clisec; ok "bad client secret -> 401"
+# client_secret may contain colons (only the first colon splits client_id:secret in Basic auth)
+COLON_SECRET="csec_part1:part2:part3"
+COLON_HASH=$(printf '%s' "$COLON_SECRET" | sha256sum | awk '{print $1}')
+sqlite3 "$DB" "UPDATE clients SET secret_hash='$COLON_HASH' WHERE client_id='$CID'"
+LOC_COLSEC=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=colsec")
+CODE_COLSEC=$(echo "$LOC_COLSEC" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+TOK_COLSEC=$(curl -sf -X POST "$B/token" -u "$CID:$COLON_SECRET" -d "grant_type=authorization_code&code=$CODE_COLSEC&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+[ -n "$(echo "$TOK_COLSEC" | J "['access_token']")" ] || fail colsec; ok "client_secret with colons in Basic auth on /token"
+# restore original client secret hash for subsequent tests
+sqlite3 "$DB" "UPDATE clients SET secret_hash='$(printf '%s' "$CSEC" | sha256sum | awk '{print $1}')' WHERE client_id='$CID'"
 # malformed Basic on /token -> 401 invalid_client (no crash)
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -H 'Authorization: Basic !!!' -d 'grant_type=authorization_code&code=x&redirect_uri=y')" = "401" ] || fail badtokbasic; ok "malformed Basic on /token -> 401"
 # missing / wrong grant_type -> 400 unsupported_grant_type
@@ -178,6 +194,28 @@ assert abs(pay['iat']-now)<=60, pay
 assert abs(pay['exp']-(now+3600))<=60, pay
 PY
 ok "id_token iat/exp within ±60s"
+# id_token claims survive JSON-special characters in name (EdDSA payload must stay valid JSON)
+./machin-idp account-new -handle json@example.com -password correct-horse-battery -name 'Agent "Seven"' -kind agent >/dev/null
+LOC_JSON=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'json@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=jsonname&nonce=jsonn")
+CODE_JSON=$(echo "$LOC_JSON" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+TOK_JSON=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_JSON&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+IDT_JSON=$(echo "$TOK_JSON" | J "['id_token']")
+python3 - "$IDT_JSON" "$JW" <<'PY' || fail jsonname
+import sys, json, base64
+idt, jwks = sys.argv[1], sys.argv[2]
+def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+h, p, s = idt.split('.')
+pay = json.loads(b64u(p))
+assert pay['name'] == 'Agent "Seven"', pay['name']
+assert pay['email'] == 'json@example.com', pay
+x = b64u(json.loads(jwks)['keys'][0]['x'])
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    Ed25519PublicKey.from_public_bytes(x).verify(b64u(s), (h + '.' + p).encode())
+except ImportError:
+    pass
+PY
+ok "id_token name claim preserves JSON-special characters"
 
 # redirect_uri mismatch at token exchange -> invalid_grant
 LOC2=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=mismatch")
@@ -199,6 +237,13 @@ CODE3=$(echo "$LOC3" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
 TOK3=$(curl -sf -X POST "$B/token" -d "grant_type=authorization_code&code=$CODE3&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&client_id=$CID&client_secret=$CSEC")
 [ -n "$(echo "$TOK3" | J "['access_token']")" ] || fail secretpost; ok "token exchange via client_secret_post"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -d "grant_type=authorization_code&code=$CODE3&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&client_id=$CID&client_secret=wrong")" = "401" ] || fail secretpostbad; ok "client_secret_post wrong secret -> 401"
+# rate limit: 61 failed client auth attempts -> 429 on the 61st
+for i in $(seq 1 60); do curl -s -o /dev/null -X POST "$B/token" -u "$CID:wrong-$i" -d "grant_type=authorization_code&code=x&redirect_uri=y"; done
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:wrong-61" -d "grant_type=authorization_code&code=x&redirect_uri=y")" = "429" ] || fail tokratelimit; ok "61st failed token client auth -> 429"
+LOC_TRL=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=trlok")
+CODE_TRL=$(echo "$LOC_TRL" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+TOK_TRL=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_TRL&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+[ -n "$(echo "$TOK_TRL" | J "['access_token']")" ] || fail tokrlok; ok "valid token exchange succeeds after token rate limit window"
 
 # code issued to client A, exchange with client B -> invalid_grant
 C_B=$(curl -sf -X POST "$B/v1/clients" -d '{"name":"otherapp","redirect_uris":"http://127.0.0.1:9999/cb"}')
@@ -223,6 +268,9 @@ UI=$(curl -sf "$B/userinfo" -H "Authorization: Bearer $AT")
 [ "$(echo "$UI" | J "['email']")" = "agent7@example.com" ] || fail userinfo; ok "userinfo returns the identity"
 [ "$(echo "$UI" | J "['sub']")" = "$SUB" ] || fail uisub; ok "userinfo sub matches"
 [ "$(echo "$UI" | J "['kind']")" = "agent" ] || fail uikind; ok "userinfo kind matches principal"
+# Bearer scheme is case-insensitive
+UI_BEAR=$(curl -sf "$B/userinfo" -H "Authorization: bearer $AT")
+[ "$(echo "$UI_BEAR" | J "['email']")" = "agent7@example.com" ] || fail bearerlower; ok "userinfo Bearer scheme case-insensitive"
 # bad token -> 401
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$B/userinfo" -H "Authorization: Bearer at_nope")" = "401" ] || fail uitoken; ok "bad access_token -> 401"
 # missing Authorization -> 401
@@ -252,6 +300,12 @@ curl -sf "$B/authorize?$AUTHQ" | grep -q "Sign in with intrane" || fail formhtml
 
 # open-redirect guard: unregistered redirect_uri -> error
 curl -s "$B/authorize?response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2Fevil.com&scope=openid&state=x" -u 'agent7@example.com:correct-horse-battery' | grep -qi "not registered" || fail openredir; ok "unregistered redirect_uri blocked"
+# comma-separated redirect_uris: second registered URI is accepted
+C_MULTI=$(curl -sf -X POST "$B/v1/clients" -d '{"name":"multi","redirect_uris":"http://127.0.0.1:9999/cb,http://127.0.0.1:8888/cb"}')
+CID_MULTI=$(echo "$C_MULTI" | J "['client_id']"); CSEC_MULTI=$(echo "$C_MULTI" | J "['client_secret']")
+AUTHQ_MULTI="response_type=code&client_id=$CID_MULTI&redirect_uri=http%3A%2F%2F127.0.0.1%3A8888%2Fcb&scope=openid&state=multi2"
+LOC_MULTI=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_MULTI")
+echo "$LOC_MULTI" | grep -q "127.0.0.1:8888/cb?code=ac_" || fail multiredir; ok "second comma-separated redirect_uri accepted"
 
 # inline signup on /authorize/signup -> auth code
 SLOC=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$B/authorize/signup" \
