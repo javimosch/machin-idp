@@ -49,6 +49,12 @@ func basic_auth_unauthorized() (res) {
     res = with_header(res, "WWW-Authenticate", "Basic realm=\"intrane\"")
 }
 
+// 429 when headless Basic auth failures are rate-limited (same body shape, no leak).
+func basic_auth_rate_limited() (res) {
+    res = response("429 Too Many Requests", "application/json", "{\"ok\":0,\"error\":\"too many attempts\"}")
+    res = with_header(res, "WWW-Authenticate", "Basic realm=\"intrane\"")
+}
+
 // GET /authorize — headless (Authorization: Basic handle:password) for agents, else a form.
 func handle_authorize(req) (res) {
     db := db_open()
@@ -70,16 +76,19 @@ func handle_authorize(req) (res) {
             handle := substr(dec, 0, ci)
             password := substr(dec, ci + 1, len(dec))
             a, aok := account_by_handle(db, handle)
-            if aok == 1 && verify_password(password, a.salt, a.pass_hash) == 1 {
-                r := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce)
-                sqlite_close(db)
-                res = r
-                return
+            // MFL evaluates both sides of && — guard before verify_password on empty row.
+            if aok == 1 {
+                if verify_password(password, a.salt, a.pass_hash) == 1 {
+                    r := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce)
+                    sqlite_close(db)
+                    res = r
+                    return
+                }
             }
         }
         if rate_allow(db, "ba:" + client_ip(req), 60, 60) == false {
             sqlite_close(db)
-            res = basic_auth_unauthorized()
+            res = basic_auth_rate_limited()
             return
         }
         sqlite_close(db)
@@ -109,7 +118,9 @@ func handle_authorize_login(req) (res) {
     }
     if okr == 0 { sqlite_close(db)  res = html_error("invalid client/redirect")  return }
     a, aok := account_by_handle(db, handle)
-    if aok == 0 || verify_password(password, a.salt, a.pass_hash) == 0 {
+    bad := 0
+    if aok == 0 { bad = 1 } else if verify_password(password, a.salt, a.pass_hash) == 0 { bad = 1 }
+    if bad == 1 {
         sqlite_close(db)
         res = ok_html(login_form_err(public_url(req), cid, redirect_uri, scope, state, nonce))
         return
@@ -179,6 +190,12 @@ func handle_token(req) (res) {
     if cok == 0 || c.secret_hash != tok_hash(csec) {
         sqlite_close(db)
         res = response("401 Unauthorized", "application/json", "{\"error\":\"invalid_client\"}")
+        return
+    }
+    gt := form_field(req.body, "grant_type")
+    if gt != "authorization_code" {
+        sqlite_close(db)
+        res = bad_request("{\"error\":\"unsupported_grant_type\"}")
         return
     }
     code := form_field(req.body, "code")

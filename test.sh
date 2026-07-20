@@ -50,6 +50,20 @@ echo "$BADPW" | grep -qi '401' || fail badpw; ok "wrong password -> 401"
 echo "$BADPW" | grep -qi 'WWW-Authenticate: Basic realm="intrane"' || fail wwwauth; ok "401 includes WWW-Authenticate realm"
 # malformed Basic -> 401
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Basic !!!' "$B/authorize?$AUTHQ")" = "401" ] || fail badbasic; ok "malformed Basic -> 401"
+# unknown handle -> 401 (same shape as wrong password — no user enumeration)
+UNK=$(curl -s -D - -o /tmp/idp_unk_body -u 'nobody@example.com:whatever' "$B/authorize?$AUTHQ")
+echo "$UNK" | grep -qi '401' || fail unkhandle; ok "unknown handle Basic -> 401"
+echo "$UNK" | grep -qi 'WWW-Authenticate: Basic realm="intrane"' || fail unkwww; ok "unknown handle includes WWW-Authenticate"
+grep -qi 'invalid credentials' /tmp/idp_unk_body || fail unkbody; ok "unknown handle body matches wrong-password shape"
+! grep -qi 'unknown\|not found\|no such' /tmp/idp_unk_body || fail unk leak; ok "unknown handle does not leak existence"
+
+# --- rate limit: 61 failed Basic attempts -> 429 on the 61st ---
+for i in $(seq 1 60); do curl -s -o /dev/null -u 'agent7@example.com:wrong' "$B/authorize?$AUTHQ&state=rl$i"; done
+RL=$(curl -s -o /dev/null -w '%{http_code}' -u 'agent7@example.com:wrong' "$B/authorize?$AUTHQ&state=rl61")
+[ "$RL" = "429" ] || fail ratelimit; ok "61st failed Basic auth -> 429"
+# valid creds still work after rate limit (success path skips rate counter)
+LOC_RL=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=rlok")
+echo "$LOC_RL" | grep -q "code=ac_" || fail ratelimit_ok; ok "valid Basic auth succeeds after rate limit window"
 
 # --- token exchange (client Basic auth) ---
 TOK=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
@@ -61,6 +75,9 @@ IDT=$(echo "$TOK" | J "['id_token']")
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "400" ] || fail onetime; ok "auth code is one-time"
 # wrong client secret -> 401
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:wrong" -d "grant_type=authorization_code&code=x&redirect_uri=y")" = "401" ] || fail clisec; ok "bad client secret -> 401"
+# missing / wrong grant_type -> 400 unsupported_grant_type
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=client_credentials&code=x&redirect_uri=y")" = "400" ] || fail badgrant; ok "wrong grant_type -> 400"
+curl -s -X POST "$B/token" -u "$CID:$CSEC" -d "code=x&redirect_uri=y" | grep -q unsupported_grant_type || fail nogrant; ok "missing grant_type -> unsupported_grant_type"
 
 # --- verify the EdDSA id_token against the jwks (independent Python check) ---
 python3 - "$IDT" "$JW" "$B" "$CID" "$SUB" <<'PY'
@@ -126,6 +143,9 @@ UI=$(curl -sf "$B/userinfo" -H "Authorization: Bearer $AT")
 [ "$(echo "$UI" | J "['sub']")" = "$SUB" ] || fail uisub; ok "userinfo sub matches"
 # bad token -> 401
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$B/userinfo" -H "Authorization: Bearer at_nope")" = "401" ] || fail uitoken; ok "bad access_token -> 401"
+# expired access_token -> 401
+sqlite3 "$DB" "UPDATE tokens SET expires_at=1 WHERE access_token='$AT'"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$B/userinfo" -H "Authorization: Bearer $AT")" = "401" ] || fail atexp; ok "expired access_token -> 401"
 
 # --- human form login path ---
 FLOC=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=correct-horse-battery" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formstate" --data-urlencode "nonce=n2")
@@ -148,5 +168,32 @@ echo "$SLOC" | grep -q "state=signupstate" || fail signupstate; ok "signup prese
 # operator CLI
 ./machin-idp account-new -handle ops@x -password opspassword -kind human | grep -q '"ok":true' || fail cli-acct; ok "cli account-new"
 ./machin-idp stats | grep -q '"agents"' || fail cli-stats; ok "cli stats"
+
+# --- custom IDP_KID: JWT header kid + JWKS kid must match ---
+PORT2=18799
+DB2=$(mktemp -d)/kid.db
+export IDP_DB="$DB2" IDP_PUBLIC_URL="http://127.0.0.1:$PORT2" IDP_KID="custom-kid-42"
+./machin-idp serve -port $PORT2 2>/dev/null &
+SRV2=$!
+trap 'kill $SRV2 2>/dev/null || true; kill $SRV 2>/dev/null || true' EXIT
+sleep 0.6
+B2="http://127.0.0.1:$PORT2"
+JW2=$(curl -sf "$B2/jwks")
+[ "$(echo "$JW2" | J "['keys'][0]['kid']")" = "custom-kid-42" ] || fail kidjwks; ok "custom IDP_KID in JWKS"
+C2=$(curl -sf -X POST "$B2/v1/clients" -d '{"name":"kidtest","redirect_uris":"http://127.0.0.1:9998/cb"}')
+CID2=$(echo "$C2" | J "['client_id']"); CSEC2=$(echo "$C2" | J "['client_secret']")
+curl -sf -X POST "$B2/v1/accounts" -d '{"handle":"kid@example.com","password":"correct-horse-battery","kind":"agent"}' >/dev/null
+AUTHQ2="response_type=code&client_id=$CID2&redirect_uri=http%3A%2F%2F127.0.0.1%3A9998%2Fcb&scope=openid&state=kid&nonce=kidn"
+LOC_K=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'kid@example.com:correct-horse-battery' "$B2/authorize?$AUTHQ2")
+CODE_K=$(echo "$LOC_K" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+TOK_K=$(curl -sf -X POST "$B2/token" -u "$CID2:$CSEC2" -d "grant_type=authorization_code&code=$CODE_K&redirect_uri=http%3A%2F%2F127.0.0.1%3A9998%2Fcb")
+IDT_K=$(echo "$TOK_K" | J "['id_token']")
+KID_HDR=$(python3 -c "import json,base64,sys; h=sys.argv[1].split('.')[0]; print(json.loads(base64.urlsafe_b64decode(h+'='*(-len(h)%4)))['kid'])" "$IDT_K")
+[ "$KID_HDR" = "custom-kid-42" ] || fail kidjwt; ok "custom IDP_KID in id_token header"
+curl -sf "$B2/llms.txt" | grep -qi portier || fail llmsportier; ok "llms.txt mentions portier"
+curl -sf "$B2/guide" | grep -q '"portier"' || fail guideportier; ok "guide_json includes portier"
+kill $SRV2 2>/dev/null || true
+unset IDP_KID
+export IDP_DB="$DB" IDP_PUBLIC_URL="http://127.0.0.1:$PORT"
 
 echo "ALL $P TESTS PASSED"
