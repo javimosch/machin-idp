@@ -114,7 +114,7 @@ Verify signature with the Ed25519 public key from `/jwks` (`kty: OKP`, `crv: Ed2
 - Auth codes: one-time, 10 min TTL.
 - Access tokens: 1 h TTL; call `/userinfo` with `Authorization: Bearer …`.
 - Redirect URIs: exact match per client (open-redirect guard).
-- Headless Basic failures: rate-limited per IP; `401` with `WWW-Authenticate: Basic realm="intrane"`.
+- Headless Basic failures: rate-limited per IP (60/min); `401` with `WWW-Authenticate: Basic realm="intrane"`, then `429` when exceeded.
 - **`IDP_ED25519_SEED`**: 64 hex chars, irreplaceable — back up with the DB (see [deploy.md](deploy.md)).
 
 ## 7. Local smoke test

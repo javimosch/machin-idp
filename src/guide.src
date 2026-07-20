@@ -34,13 +34,17 @@ func llms_txt(base) (t) {
         "POST /token       code -> {access_token, id_token}\n" +
         "GET  /userinfo    Bearer access_token -> claims\n\n" +
         "Signing: EdDSA (Ed25519) — modern, small keys, pure MFL. id_tokens carry\n" +
-        "{iss, sub, aud, iat, exp, email, name}.\n"
+        "{iss, sub, aud, iat, exp, email, name}.\n\n" +
+        "## portier integration\n\n" +
+        "Register machin-idp as a generic OIDC provider in portier for 'Login with intrane'.\n" +
+        "Step-by-step: " + base + "/guide (JSON) and docs/portier.md in the repo.\n"
 }
 
 func guide_json(base) (j) {
     j = "{\"name\":\"machin-idp\",\"version\":\"" + app_version() + "\",\"tagline\":\"an OIDC identity provider for the agent era — humans and agents, headless login, EdDSA id_tokens\"," +
         "\"base_url\":" + json(base) + ",\"id_token_alg\":\"EdDSA\",\"discovery\":" + json(base + "/.well-known/openid-configuration") + ",\"jwks\":" + json(base + "/jwks") + "," +
-        "\"flow\":[\"POST /v1/accounts -> a principal\",\"POST /v1/clients -> client_id + secret\",\"GET /authorize (Basic for agents, form for humans) -> code\",\"POST /token -> access_token + EdDSA id_token\",\"GET /userinfo\"]}"
+        "\"flow\":[\"POST /v1/accounts -> a principal\",\"POST /v1/clients -> client_id + secret\",\"GET /authorize (Basic for agents, form for humans) -> code\",\"POST /token -> access_token + EdDSA id_token\",\"GET /userinfo\"]," +
+        "\"portier\":{\"docs\":\"https://github.com/javimosch/machin-idp/blob/master/docs/portier.md\",\"provider_kind\":\"oidc\",\"provider_name\":\"intrane\"}}"
 }
 
 func help_text() (h) {
