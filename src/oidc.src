@@ -76,14 +76,17 @@ func handle_authorize(req) (res) {
         if ci > 0 {
             handle := substr(dec, 0, ci)
             password := substr(dec, ci + 1, len(dec))
-            a, aok := account_by_handle(db, handle)
-            // MFL evaluates both sides of && — guard before verify_password on empty row.
-            if aok == 1 {
-                if verify_password(password, a.salt, a.pass_hash) == 1 {
-                    r := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce)
-                    sqlite_close(db)
-                    res = r
-                    return
+            // Require non-empty handle and password — empty either is always invalid.
+            if handle != "" && password != "" {
+                a, aok := account_by_handle(db, handle)
+                // MFL evaluates both sides of && — guard before verify_password on empty row.
+                if aok == 1 {
+                    if verify_password(password, a.salt, a.pass_hash) == 1 {
+                        r := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce)
+                        sqlite_close(db)
+                        res = r
+                        return
+                    }
                 }
             }
         }
