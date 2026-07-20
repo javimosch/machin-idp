@@ -43,6 +43,12 @@ func issue_code_redirect(db, cid, sub, redirect_uri, scope, state, nonce) (res) 
     res = redirect(dest)
 }
 
+// 401 for failed/malformed headless Basic auth — RFC 7617 realm + no info leak.
+func basic_auth_unauthorized() (res) {
+    res = response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"invalid credentials\"}")
+    res = with_header(res, "WWW-Authenticate", "Basic realm=\"intrane\"")
+}
+
 // GET /authorize — headless (Authorization: Basic handle:password) for agents, else a form.
 func handle_authorize(req) (res) {
     db := db_open()
@@ -53,8 +59,13 @@ func handle_authorize(req) (res) {
     // headless agent path: HTTP Basic with the principal's handle:password
     auth := header(req, "authorization")
     if has_prefix(to_lower(auth), "basic ") {
-        dec := base64_decode(trim(substr(auth, 6, len(auth))))
-        ci := index(dec, ":")
+        b64 := trim(substr(auth, 6, len(auth)))
+        dec := ""
+        ci := -1
+        if b64 != "" {
+            dec = base64_decode(b64)
+            ci = index(dec, ":")
+        }
         if ci > 0 {
             handle := substr(dec, 0, ci)
             password := substr(dec, ci + 1, len(dec))
@@ -66,8 +77,13 @@ func handle_authorize(req) (res) {
                 return
             }
         }
+        if rate_allow(db, "ba:" + client_ip(req), 60, 60) == false {
+            sqlite_close(db)
+            res = basic_auth_unauthorized()
+            return
+        }
         sqlite_close(db)
-        res = response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"invalid credentials\"}")
+        res = basic_auth_unauthorized()
         return
     }
     sqlite_close(db)
@@ -166,12 +182,13 @@ func handle_token(req) (res) {
         return
     }
     code := form_field(req.body, "code")
+    req_redirect := form_field(req.body, "redirect_uri")
     rows := sqlite_query(db, "SELECT client_id, sub, redirect_uri, scope, nonce, expires_at FROM codes WHERE code = ?", []string{code})
     list := parse(rows, []CodeRow{})
     if len(list) == 0 { sqlite_close(db)  res = bad_request("{\"error\":\"invalid_grant\"}")  return }
     cr := list[0]
     sqlite_exec(db, "DELETE FROM codes WHERE code = ?", []string{code})   // one-time
-    if cr.client_id != cid || now() > cr.expires_at {
+    if cr.client_id != cid || now() > cr.expires_at || req_redirect != cr.redirect_uri {
         sqlite_close(db)
         res = bad_request("{\"error\":\"invalid_grant\"}")
         return
