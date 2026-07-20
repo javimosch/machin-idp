@@ -121,7 +121,7 @@ Verify signature with the Ed25519 public key from `/jwks` (`kty: OKP`, `crv: Ed2
 ## 7. Local smoke test
 
 ```sh
-./build.sh && ./test.sh   # 51 assertions incl. portier-relevant OIDC checks
+./build.sh && ./test.sh   # 59 assertions incl. portier-relevant OIDC checks
 ```
 
 ## 8. Troubleshooting (portier + machin-idp)
@@ -130,11 +130,31 @@ Verify signature with the Ed25519 public key from `/jwks` (`kty: OKP`, `crv: Ed2
 |---------|--------------|-----|
 | id_token verification fails | Expecting RSA/RS256 | machin-idp signs **EdDSA (Ed25519)** only — fetch `/jwks` (OKP key, not RSA) |
 | `invalid_grant` at `/token` | `redirect_uri` mismatch | The `redirect_uri` in the token request must **exact match** the one used in `/authorize` |
-| Headless agent gets `401` | Wrong Basic credentials or unknown handle | Use `Authorization: Basic` with `handle:password`; failures return `401` + `WWW-Authenticate: Basic realm="intrane"` (same shape for unknown handles — no enumeration) |
+| Headless agent gets `401` | Wrong Basic credentials or unknown handle | Use `Authorization: Basic` with `handle:password`; failures return `401` + `WWW-Authenticate: Basic realm="intrane"` (same shape for unknown handles — no enumeration). An empty `Authorization: Basic` header (no credentials) also returns `401`, not the browser form. |
 | Headless agent gets `429` | Rate limit (60 failed Basic attempts/min per IP) | Wait one minute or use correct credentials (success path is not rate-limited) |
 | Form login loops with "invalid credentials" | Wrong password or rate limit (60/min per IP) | Same rate-limit window as headless Basic; check password and wait if throttled |
 | `unknown client_id` | Client not registered on machin-idp | `POST /v1/clients` with the exact callback URL portier uses |
 | Discovery/JWKS 404 | Wrong base URL | Use `IDP_PUBLIC_URL` / issuer exactly (e.g. `https://idp.intrane.fr`) |
+
+## 9. Example portier provider config
+
+Minimal OIDC provider block for portier (env or config — adjust URLs/secrets):
+
+```json
+{
+  "kind": "oidc",
+  "name": "intrane",
+  "display_name": "Login with intrane",
+  "discovery_url": "https://idp.intrane.fr/.well-known/openid-configuration",
+  "client_id": "cid_…",
+  "client_secret": "csec_…",
+  "redirect_uri": "https://portier.example/cb"
+}
+```
+
+portier fetches discovery, validates EdDSA `id_token` signatures against `/jwks`, and
+proxies human users to the machin-idp sign-in form. Agents authenticate headlessly with
+HTTP Basic on `/authorize` upstream (or via portier if configured to forward credentials).
 
 See also [README.md](../README.md) and live discovery at
 [https://idp.intrane.fr/.well-known/openid-configuration](https://idp.intrane.fr/.well-known/openid-configuration).

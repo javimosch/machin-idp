@@ -63,9 +63,10 @@ func handle_authorize(req) (res) {
     if err != "" { sqlite_close(db)  res = html_error(err)  return }
 
     // headless agent path: HTTP Basic with the principal's handle:password
+    // Treat any "Basic" scheme as headless — empty/malformed creds must 401, not fall through to the form.
     auth := header(req, "authorization")
-    if has_prefix(to_lower(auth), "basic ") {
-        b64 := trim(substr(auth, 6, len(auth)))
+    if has_prefix(to_lower(auth), "basic") {
+        b64 := trim(substr(auth, 5, len(auth)))
         dec := ""
         ci := -1
         if b64 != "" {
@@ -185,9 +186,14 @@ func handle_token(req) (res) {
     cid := ""
     csec := ""
     auth := header(req, "authorization")
-    if has_prefix(to_lower(auth), "basic ") {
-        dec := base64_decode(trim(substr(auth, 6, len(auth))))
-        ci := index(dec, ":")
+    if has_prefix(to_lower(auth), "basic") {
+        b64 := trim(substr(auth, 5, len(auth)))
+        dec := ""
+        ci := -1
+        if b64 != "" {
+            dec = base64_decode(b64)
+            ci = index(dec, ":")
+        }
         if ci > 0 { cid = substr(dec, 0, ci)  csec = substr(dec, ci + 1, len(dec)) }
     }
     if cid == "" { cid = form_field(req.body, "client_id")  csec = form_field(req.body, "client_secret") }

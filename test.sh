@@ -29,6 +29,7 @@ D=$(curl -sf "$B/.well-known/openid-configuration")
 [ "$(echo "$D" | J "['issuer']")" = "$B" ] || fail iss; ok "discovery issuer"
 JW=$(curl -sf "$B/jwks")
 [ "$(echo "$JW" | J "['keys'][0]['crv']")" = "Ed25519" ] || fail jwks; ok "jwks exposes Ed25519 OKP key"
+[ "$(curl -sf "$B/.well-known/jwks.json" | J "['keys'][0]['kty']")" = "OKP" ] || fail jwksalt; ok "alternate jwks path /.well-known/jwks.json"
 
 # register a principal (agent) + a client
 A=$(curl -sf -X POST "$B/v1/accounts" -d '{"handle":"agent7@example.com","password":"correct-horse-battery","name":"Agent 7","kind":"agent"}')
@@ -52,6 +53,9 @@ echo "$BADPW" | grep -qi '401' || fail badpw; ok "wrong password -> 401"
 echo "$BADPW" | grep -qi 'WWW-Authenticate: Basic realm="intrane"' || fail wwwauth; ok "401 includes WWW-Authenticate realm"
 # malformed Basic -> 401
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Basic !!!' "$B/authorize?$AUTHQ")" = "401" ] || fail badbasic; ok "malformed Basic -> 401"
+# empty Basic scheme (no credentials) -> 401, not the browser form
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Basic' "$B/authorize?$AUTHQ")" = "401" ] || fail emptybasic; ok "empty Basic scheme -> 401"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Basic ' "$B/authorize?$AUTHQ")" = "401" ] || fail emptybasicsp; ok "Basic with empty payload -> 401"
 # unknown handle -> 401 (same shape as wrong password — no user enumeration)
 UNK=$(curl -s -D - -o /tmp/idp_unk_body -u 'nobody@example.com:whatever' "$B/authorize?$AUTHQ")
 echo "$UNK" | grep -qi '401' || fail unkhandle; ok "unknown handle Basic -> 401"
@@ -91,6 +95,7 @@ def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
 h,p,s = idt.split('.')
 hdr=json.loads(b64u(h)); pay=json.loads(b64u(p)); sig=b64u(s)
 assert hdr['alg']=='EdDSA', hdr
+assert hdr.get('typ')=='JWT', hdr
 jkid=json.loads(jwks)['keys'][0]['kid']
 assert hdr.get('kid')==jkid, (hdr, jkid)
 assert pay['iss']==iss and pay['aud']==cid and pay['sub']==sub, pay
@@ -122,6 +127,37 @@ except Exception as e: print("SIGBAD")
 PY
 )
 [ "$SIGRES" != "SIGBAD" ] || fail sigverify; ok "id_token EdDSA signature verifies against jwks ($SIGRES)"
+# tampered signature must not verify
+TAMP=$(python3 - "$IDT" "$JW" <<'PY'
+import sys, json, base64
+idt, jwks = sys.argv[1], sys.argv[2]
+def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+h,p,s = idt.split('.')
+sig = bytearray(b64u(s)); sig[0] ^= 0xff
+bad = h + '.' + p + '.' + base64.urlsafe_b64encode(bytes(sig)).decode().rstrip('=')
+x = b64u(json.loads(jwks)['keys'][0]['x'])
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    Ed25519PublicKey.from_public_bytes(x).verify(b64u(bad.split('.')[2]), (h+'.'+p).encode())
+    print('SIGBAD')
+except ImportError: print('SIGSKIP')
+except Exception: print('SIGOK')
+PY
+)
+[ "$TAMP" = "SIGOK" ] || fail tamper; ok "tampered id_token signature rejected ($TAMP)"
+# id_token omits nonce when authorize had none
+AUTHQ_NONONCE="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid&state=nononce"
+LOC_NN=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_NONONCE")
+CODE_NN=$(echo "$LOC_NN" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+TOK_NN=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_NN&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+IDT_NN=$(echo "$TOK_NN" | J "['id_token']")
+python3 - "$IDT_NN" <<'PY' || fail nononce
+import sys, json, base64
+def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+pay = json.loads(b64u(sys.argv[1].split('.')[1]))
+assert 'nonce' not in pay, pay
+PY
+ok "id_token omits nonce when authorize had none"
 python3 - "$IDT" <<'PY' || fail iatexp
 import sys, json, base64, time
 def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
@@ -180,6 +216,9 @@ FORM_BAD=$(curl -s -o /tmp/form_bad_body -w '%{http_code}' -X POST "$B/authorize
 [ "$FORM_BAD" = "200" ] || fail formbadcode
 grep -qi 'invalid credentials' /tmp/form_bad_body || fail formbadmsg; ok "form login wrong password -> error form, no code"
 ! grep -q 'code=ac_' /tmp/form_bad_body || fail formbadleak; ok "form login wrong password does not leak code"
+# form login rate limit: 61 failed attempts -> 429
+for i in $(seq 1 60); do curl -s -o /dev/null -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=wrong-$i" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formrl$i"; done
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=wrong-61" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formrl61")" = "429" ] || fail formratelimit; ok "61st failed form login -> 429"
 # /authorize without creds serves the sign-in form
 curl -sf "$B/authorize?$AUTHQ" | grep -q "Sign in with intrane" || fail formhtml; ok "/authorize serves a sign-in form for browsers"
 
@@ -222,6 +261,16 @@ KID_HDR=$(python3 -c "import json,base64,sys; h=sys.argv[1].split('.')[0]; print
 [ "$KID_HDR" = "custom-kid-42" ] || fail kidjwt; ok "custom IDP_KID in id_token header"
 curl -sf "$B2/llms.txt" | grep -qi portier || fail llmsportier; ok "llms.txt mentions portier"
 curl -sf "$B2/guide" | grep -q '"portier"' || fail guideportier; ok "guide_json includes portier"
+
+# invalid IDP_ED25519_SEED aborts serve at boot
+DB_BOOT=$(mktemp -d)/boot.db
+set +e
+BOOT_OUT=$(IDP_DB="$DB_BOOT" IDP_PUBLIC_URL="http://127.0.0.1:18888" IDP_ED25519_SEED="not-valid" ./machin-idp serve -port 18888 2>&1)
+BOOT_EC=$?
+set -e
+[ "$BOOT_EC" -eq 1 ] || fail badseedec; ok "invalid IDP_ED25519_SEED exits non-zero at boot"
+echo "$BOOT_OUT" | grep -q 'IDP_ED25519_SEED must be exactly 64 hex' || fail badseedmsg; ok "invalid IDP_ED25519_SEED logs fatal reason"
+
 kill $SRV2 2>/dev/null || true
 unset IDP_KID
 export IDP_DB="$DB" IDP_PUBLIC_URL="http://127.0.0.1:$PORT"
