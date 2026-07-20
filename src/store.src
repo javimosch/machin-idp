@@ -93,6 +93,17 @@ func seed_hex_valid(h) (ok) {
     ok = 1
 }
 
+// kid_safe rejects values that would break JWT/JWKS JSON (quotes, backslashes, control chars).
+func kid_safe(k) (ok) {
+    ok = 1
+    i := 0
+    while i < len(k) {
+        c := substr(k, i, i + 1)
+        if index("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-", c) < 0 { ok = 0  return }
+        i = i + 1
+    }
+}
+
 func check_signing_seed_at_boot() {
     h := env("IDP_ED25519_SEED")
     if h == "" {
@@ -101,6 +112,11 @@ func check_signing_seed_at_boot() {
     }
     if seed_hex_valid(h) == 0 {
         write(2, "{\"fatal\":\"IDP_ED25519_SEED must be exactly 64 hex characters (32-byte Ed25519 seed)\"}\n")
+        exit(1)
+    }
+    k := env("IDP_KID")
+    if k != "" && kid_safe(k) == 0 {
+        write(2, "{\"fatal\":\"IDP_KID must be alphanumeric plus . _ - (no quotes or JSON metacharacters)\"}\n")
         exit(1)
     }
 }

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end OIDC: discovery, jwks, register account+client, headless agent login,
 # human form login, token exchange, EdDSA id_token verified against jwks, userinfo,
-# redirect_uri enforcement, nonce/kid claims, signup, security guards.
+# redirect_uri enforcement, nonce/kid/name claims, signup, security guards.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-[ -x ./machin-idp ] || ./build.sh
+./build.sh
 
 PORT=18798
 DB=$(mktemp -d)/test.db
@@ -62,6 +62,13 @@ echo "$UNK" | grep -qi '401' || fail unkhandle; ok "unknown handle Basic -> 401"
 echo "$UNK" | grep -qi 'WWW-Authenticate: Basic realm="intrane"' || fail unkwww; ok "unknown handle includes WWW-Authenticate"
 grep -qi 'invalid credentials' /tmp/idp_unk_body || fail unkbody; ok "unknown handle body matches wrong-password shape"
 ! grep -qi 'unknown\|not found\|no such' /tmp/idp_unk_body || fail unk leak; ok "unknown handle does not leak existence"
+# Basic auth password may contain colons (only the first colon splits handle:password)
+curl -sf -X POST "$B/v1/accounts" -d '{"handle":"colon@example.com","password":"pass:with:colons","kind":"agent"}' >/dev/null
+LOC_COLON=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'colon@example.com:pass:with:colons' "$B/authorize?$AUTHQ&state=colon")
+echo "$LOC_COLON" | grep -q "code=ac_" || fail colonpw; ok "Basic auth password may contain colons"
+# empty handle or password in Basic -> 401 (not the browser form)
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Basic $(printf ':secret' | base64 -w0)" "$B/authorize?$AUTHQ")" = "401" ] || fail emptyhandle; ok "Basic with empty handle -> 401"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -u 'agent7@example.com:' "$B/authorize?$AUTHQ")" = "401" ] || fail emptypw; ok "Basic with empty password -> 401"
 
 # --- rate limit: 61 failed Basic attempts -> 429 on the 61st ---
 for i in $(seq 1 60); do curl -s -o /dev/null -u 'agent7@example.com:wrong' "$B/authorize?$AUTHQ&state=rl$i"; done
@@ -77,6 +84,9 @@ AT=$(echo "$TOK" | J "['access_token']")
 IDT=$(echo "$TOK" | J "['id_token']")
 [ -n "$AT" ] || fail token; ok "token exchange returns access_token"
 [ -n "$IDT" ] || fail idt; ok "id_token issued"
+[ "$(echo "$TOK" | J "['scope']")" = "openid email" ] || fail scope; ok "token response echoes authorize scope"
+# token exchange without client credentials -> 401 invalid_client
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -d "grant_type=authorization_code&code=$CODE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "401" ] || fail noclient; ok "token exchange without client auth -> 401"
 # code is one-time
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "400" ] || fail onetime; ok "auth code is one-time"
 # wrong client secret -> 401
@@ -100,6 +110,7 @@ jkid=json.loads(jwks)['keys'][0]['kid']
 assert hdr.get('kid')==jkid, (hdr, jkid)
 assert pay['iss']==iss and pay['aud']==cid and pay['sub']==sub, pay
 assert pay['email']=='agent7@example.com', pay
+assert pay.get('name')=='Agent 7', pay
 assert pay.get('nonce')=='n1', pay
 import time
 now=int(time.time())
@@ -211,6 +222,7 @@ curl -s "$B/authorize?response_type=token&client_id=$CID&redirect_uri=http%3A%2F
 UI=$(curl -sf "$B/userinfo" -H "Authorization: Bearer $AT")
 [ "$(echo "$UI" | J "['email']")" = "agent7@example.com" ] || fail userinfo; ok "userinfo returns the identity"
 [ "$(echo "$UI" | J "['sub']")" = "$SUB" ] || fail uisub; ok "userinfo sub matches"
+[ "$(echo "$UI" | J "['kind']")" = "agent" ] || fail uikind; ok "userinfo kind matches principal"
 # bad token -> 401
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$B/userinfo" -H "Authorization: Bearer at_nope")" = "401" ] || fail uitoken; ok "bad access_token -> 401"
 # missing Authorization -> 401
@@ -286,6 +298,15 @@ BOOT_EC=$?
 set -e
 [ "$BOOT_EC" -eq 1 ] || fail badseedec; ok "invalid IDP_ED25519_SEED exits non-zero at boot"
 echo "$BOOT_OUT" | grep -q 'IDP_ED25519_SEED must be exactly 64 hex' || fail badseedmsg; ok "invalid IDP_ED25519_SEED logs fatal reason"
+
+# invalid IDP_KID aborts serve at boot (would break JWT/JWKS JSON)
+DB_KID=$(mktemp -d)/kidbad.db
+set +e
+KID_OUT=$(IDP_DB="$DB_KID" IDP_PUBLIC_URL="http://127.0.0.1:18890" IDP_ED25519_SEED="1111111111111111111111111111111111111111111111111111111111111111" IDP_KID='bad"quote' ./machin-idp serve -port 18890 2>&1)
+KID_EC=$?
+set -e
+[ "$KID_EC" -eq 1 ] || fail badkidec; ok "invalid IDP_KID exits non-zero at boot"
+echo "$KID_OUT" | grep -q 'IDP_KID must be alphanumeric' || fail badkidmsg; ok "invalid IDP_KID logs fatal reason"
 
 kill $SRV2 2>/dev/null || true
 unset IDP_KID

@@ -4,7 +4,7 @@ OIDC identity provider in machin. Principals = humans OR agents; headless login
 (HTTP Basic on /authorize) + a form. EdDSA (Ed25519) id_tokens + JWKS. The identity
 behind portier's "Login with intrane".
 
-- Build: `./build.sh`. Test: `./test.sh` (66 assertions incl. EdDSA-verify-against-jwks, headless+form login, redirect_uri token check, nonce/kid claims). Keep green.
+- Build: `./build.sh`. Test: `./test.sh` (74 assertions incl. EdDSA-verify-against-jwks, headless+form login, redirect_uri token check, nonce/kid/name claims). Keep green.
 - JWT: EdDSA via ed25519_sign(seed,msg); JWKS = OKP/Ed25519 pubkey (ed25519_pub(seed)). base64url = base64_encode_bytes + translate +/->-_ strip =. Passwords = pbkdf2_sha256(bytes,bytes,60000,32).
 - MFL gotcha hit: one type per var name per scope — a `range` loop var `r` (string) collided with `r := issue_code_redirect(...)` (struct) in handle_authorize_login → "string vs struct". Renamed.
 - MFL gotcha: `&&` / `||` evaluate both operands — never `aok == 1 && verify_password(...)` on a maybe-empty AccountRow; nest the `if` instead (segfault on unknown handle).

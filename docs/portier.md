@@ -109,6 +109,9 @@ EdDSA JWT with header `{alg:"EdDSA", typ:"JWT", kid:"idp-ed25519-1"}` and payloa
 
 Verify signature with the Ed25519 public key from `/jwks` (`kty: OKP`, `crv: Ed25519`).
 
+`/userinfo` also returns `kind` (`human` or `agent`) so portier or downstream apps can
+distinguish browser users from headless agents.
+
 ## 6. Security notes
 
 - Auth codes: one-time, 10 min TTL.
@@ -117,11 +120,12 @@ Verify signature with the Ed25519 public key from `/jwks` (`kty: OKP`, `crv: Ed2
 - Headless Basic failures: rate-limited per IP (60/min); `401` with `WWW-Authenticate: Basic realm="intrane"`, then `429` when exceeded.
 - Form login failures: same rate limit per IP (60/min); `429` with an error form when exceeded.
 - **`IDP_ED25519_SEED`**: 64 hex chars, irreplaceable — back up with the DB (see [deploy.md](deploy.md)).
+- **`IDP_KID`**: optional JWT/JWKS key id (default `idp-ed25519-1`); must be alphanumeric plus `.`, `_`, `-` — quotes or JSON metacharacters abort boot.
 
 ## 7. Local smoke test
 
 ```sh
-./build.sh && ./test.sh   # 66 assertions incl. portier-relevant OIDC checks
+./build.sh && ./test.sh   # 74 assertions incl. portier-relevant OIDC checks
 ```
 
 ## 8. Troubleshooting (portier + machin-idp)
