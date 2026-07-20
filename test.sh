@@ -78,8 +78,9 @@ echo "$LOC_COLON" | grep -q "code=ac_" || fail colonpw; ok "Basic auth password 
 
 # --- rate limit: 61 failed Basic attempts -> 429 on the 61st ---
 for i in $(seq 1 60); do curl -s -o /dev/null -u 'agent7@example.com:wrong' "$B/authorize?$AUTHQ&state=rl$i"; done
-RL=$(curl -s -o /dev/null -w '%{http_code}' -u 'agent7@example.com:wrong' "$B/authorize?$AUTHQ&state=rl61")
+RL=$(curl -s -D /tmp/idp_rl_hdr -o /dev/null -w '%{http_code}' -u 'agent7@example.com:wrong' "$B/authorize?$AUTHQ&state=rl61")
 [ "$RL" = "429" ] || fail ratelimit; ok "61st failed Basic auth -> 429"
+grep -qi 'WWW-Authenticate: Basic realm="intrane"' /tmp/idp_rl_hdr || fail rlwww; ok "Basic auth 429 includes WWW-Authenticate realm"
 # valid creds still work after rate limit (success path skips rate counter)
 LOC_RL=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=rlok")
 echo "$LOC_RL" | grep -q "code=ac_" || fail ratelimit_ok; ok "valid Basic auth succeeds after rate limit window"
@@ -90,6 +91,8 @@ AT=$(echo "$TOK" | J "['access_token']")
 IDT=$(echo "$TOK" | J "['id_token']")
 [ -n "$AT" ] || fail token; ok "token exchange returns access_token"
 [ -n "$IDT" ] || fail idt; ok "id_token issued"
+[ "$(echo "$TOK" | J "['token_type']")" = "Bearer" ] || fail toktype; ok "token response token_type Bearer"
+[ "$(echo "$TOK" | J "['expires_in']")" = "3600" ] || fail tokexp; ok "token response expires_in 3600"
 [ "$(echo "$TOK" | J "['scope']")" = "openid email" ] || fail scope; ok "token response echoes authorize scope"
 # token exchange without client credentials -> 401 invalid_client
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -d "grant_type=authorization_code&code=$CODE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "401" ] || fail noclient; ok "token exchange without client auth -> 401"
@@ -172,6 +175,27 @@ except Exception: print('SIGOK')
 PY
 )
 [ "$TAMP" = "SIGOK" ] || fail tamper; ok "tampered id_token signature rejected ($TAMP)"
+# tampered payload must not verify (signature was for the original claims)
+TAMP_PAY=$(python3 - "$IDT" "$JW" <<'PY'
+import sys, json, base64
+idt, jwks = sys.argv[1], sys.argv[2]
+def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+def b64ue(b): return base64.urlsafe_b64encode(b).decode().rstrip('=')
+h, p, s = idt.split('.')
+pay = json.loads(b64u(p))
+pay['sub'] = 'u_evil'
+p2 = b64ue(json.dumps(pay, separators=(',', ':'), ensure_ascii=False).encode())
+bad = h + '.' + p2 + '.' + s
+x = b64u(json.loads(jwks)['keys'][0]['x'])
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    Ed25519PublicKey.from_public_bytes(x).verify(b64u(s), (h + '.' + p2).encode())
+    print('SIGBAD')
+except ImportError: print('SIGSKIP')
+except Exception: print('SIGOK')
+PY
+)
+[ "$TAMP_PAY" = "SIGOK" ] || fail tamperpay; ok "tampered id_token payload rejected ($TAMP_PAY)"
 # id_token omits nonce when authorize had none
 AUTHQ_NONONCE="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid&state=nononce"
 LOC_NN=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_NONONCE")
@@ -295,6 +319,8 @@ grep -qi 'invalid credentials' /tmp/form_unk_body || fail formunkmsg; ok "form l
 # form login rate limit: 61 failed attempts -> 429
 for i in $(seq 1 60); do curl -s -o /dev/null -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=wrong-$i" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formrl$i"; done
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=wrong-61" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formrl61")" = "429" ] || fail formratelimit; ok "61st failed form login -> 429"
+FLOC_RL=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=correct-horse-battery" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formrlok" --data-urlencode "nonce=n2rl")
+echo "$FLOC_RL" | grep -q "code=ac_" || fail formrlok; ok "form login succeeds after rate limit window"
 # /authorize without creds serves the sign-in form
 curl -sf "$B/authorize?$AUTHQ" | grep -q "Sign in with intrane" || fail formhtml; ok "/authorize serves a sign-in form for browsers"
 
