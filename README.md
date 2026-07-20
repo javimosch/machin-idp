@@ -57,7 +57,7 @@ Independently verified: the id_tokens pass Python `cryptography`'s Ed25519 check
 
 ```sh
 ./build.sh    # -> ./machin-idp
-./test.sh     # 33+ assertion OIDC e2e incl. EdDSA-verify-against-jwks, headless + form login
+./test.sh     # 51 assertion OIDC e2e incl. EdDSA-verify-against-jwks, headless + form login
 ```
 
 Env: `IDP_DB` · `IDP_PUBLIC_URL` · `IDP_ED25519_SEED` (64 hex — the signing key; set in
