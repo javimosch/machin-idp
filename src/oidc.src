@@ -202,6 +202,11 @@ func handle_token(req) (res) {
     if cid == "" { cid = form_field(req.body, "client_id")  csec = form_field(req.body, "client_secret") }
     c, cok := client_by_id(db, cid)
     if cok == 0 || c.secret_hash != tok_hash(csec) {
+        if rate_allow(db, "tc:" + client_ip(req), 60, 60) == false {
+            sqlite_close(db)
+            res = response("429 Too Many Requests", "application/json", "{\"error\":\"too_many_requests\"}")
+            return
+        }
         sqlite_close(db)
         res = response("401 Unauthorized", "application/json", "{\"error\":\"invalid_client\"}")
         return
