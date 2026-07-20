@@ -121,7 +121,7 @@ Verify signature with the Ed25519 public key from `/jwks` (`kty: OKP`, `crv: Ed2
 ## 7. Local smoke test
 
 ```sh
-./build.sh && ./test.sh   # 59 assertions incl. portier-relevant OIDC checks
+./build.sh && ./test.sh   # 66 assertions incl. portier-relevant OIDC checks
 ```
 
 ## 8. Troubleshooting (portier + machin-idp)
@@ -129,7 +129,7 @@ Verify signature with the Ed25519 public key from `/jwks` (`kty: OKP`, `crv: Ed2
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | id_token verification fails | Expecting RSA/RS256 | machin-idp signs **EdDSA (Ed25519)** only — fetch `/jwks` (OKP key, not RSA) |
-| `invalid_grant` at `/token` | `redirect_uri` mismatch | The `redirect_uri` in the token request must **exact match** the one used in `/authorize` |
+| `invalid_grant` at `/token` | `redirect_uri` mismatch or omitted | The `redirect_uri` in the token request must **exact match** the one used in `/authorize`; omitting it also returns `invalid_grant` |
 | Headless agent gets `401` | Wrong Basic credentials or unknown handle | Use `Authorization: Basic` with `handle:password`; failures return `401` + `WWW-Authenticate: Basic realm="intrane"` (same shape for unknown handles — no enumeration). An empty `Authorization: Basic` header (no credentials) also returns `401`, not the browser form. |
 | Headless agent gets `429` | Rate limit (60 failed Basic attempts/min per IP) | Wait one minute or use correct credentials (success path is not rate-limited) |
 | Form login loops with "invalid credentials" | Wrong password or rate limit (60/min per IP) | Same rate-limit window as headless Basic; check password and wait if throttled |
