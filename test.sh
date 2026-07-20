@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end OIDC: discovery, jwks, register account+client, headless agent login,
-# human form login, token exchange, EdDSA id_token verified against jwks, userinfo.
+# human form login, token exchange, EdDSA id_token verified against jwks, userinfo,
+# redirect_uri enforcement, nonce/kid claims, signup, security guards.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -43,8 +44,12 @@ LOC=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-h
 echo "$LOC" | grep -q "127.0.0.1:9999/cb?code=ac_" || fail headless; ok "headless agent login -> code"
 echo "$LOC" | grep -q "state=xyz" || fail hstate; ok "state preserved"
 CODE=$(echo "$LOC" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
-# wrong password -> 401
-[ "$(curl -s -o /dev/null -w '%{http_code}' -u 'agent7@example.com:wrong' "$B/authorize?$AUTHQ")" = "401" ] || fail badpw; ok "wrong password -> 401"
+# wrong password -> 401 + WWW-Authenticate
+BADPW=$(curl -s -D - -o /dev/null -u 'agent7@example.com:wrong' "$B/authorize?$AUTHQ")
+echo "$BADPW" | grep -qi '401' || fail badpw; ok "wrong password -> 401"
+echo "$BADPW" | grep -qi 'WWW-Authenticate: Basic realm="intrane"' || fail wwwauth; ok "401 includes WWW-Authenticate realm"
+# malformed Basic -> 401
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Basic !!!' "$B/authorize?$AUTHQ")" = "401" ] || fail badbasic; ok "malformed Basic -> 401"
 
 # --- token exchange (client Basic auth) ---
 TOK=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
@@ -65,8 +70,11 @@ def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
 h,p,s = idt.split('.')
 hdr=json.loads(b64u(h)); pay=json.loads(b64u(p)); sig=b64u(s)
 assert hdr['alg']=='EdDSA', hdr
+jkid=json.loads(jwks)['keys'][0]['kid']
+assert hdr.get('kid')==jkid, (hdr, jkid)
 assert pay['iss']==iss and pay['aud']==cid and pay['sub']==sub, pay
 assert pay['email']=='agent7@example.com', pay
+assert pay.get('nonce')=='n1', pay
 x=b64u(json.loads(jwks)['keys'][0]['x'])
 try:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -90,6 +98,28 @@ PY
 )
 [ "$SIGRES" != "SIGBAD" ] || fail sigverify; ok "id_token EdDSA signature verifies against jwks ($SIGRES)"
 
+# redirect_uri mismatch at token exchange -> invalid_grant
+LOC2=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=mismatch")
+CODE2=$(echo "$LOC2" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE2" ] || fail code2
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE2&redirect_uri=http%3A%2F%2Fevil.com%2Fcb")" = "400" ] || fail redirmismatch; ok "redirect_uri mismatch -> invalid_grant"
+
+# client_secret_post (no Basic) on /token
+LOC3=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=postauth")
+CODE3=$(echo "$LOC3" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+TOK3=$(curl -sf -X POST "$B/token" -d "grant_type=authorization_code&code=$CODE3&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&client_id=$CID&client_secret=$CSEC")
+[ -n "$(echo "$TOK3" | J "['access_token']")" ] || fail secretpost; ok "token exchange via client_secret_post"
+
+# expired auth code -> invalid_grant
+LOC4=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=expired")
+CODE4=$(echo "$LOC4" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+sqlite3 "$DB" "UPDATE codes SET expires_at=1 WHERE code='$CODE4'"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE4&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "400" ] || fail codexp; ok "expired auth code -> invalid_grant"
+
+# unknown client_id / bad response_type
+curl -s "$B/authorize?response_type=code&client_id=cid_nope&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid" | grep -qi "unknown client" || fail unkclient; ok "unknown client_id -> error"
+curl -s "$B/authorize?response_type=token&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid" | grep -qi "response_type must be code" || fail badrt; ok "response_type != code -> error"
+
 # --- userinfo ---
 UI=$(curl -sf "$B/userinfo" -H "Authorization: Bearer $AT")
 [ "$(echo "$UI" | J "['email']")" = "agent7@example.com" ] || fail userinfo; ok "userinfo returns the identity"
@@ -105,6 +135,15 @@ curl -sf "$B/authorize?$AUTHQ" | grep -q "Sign in with intrane" || fail formhtml
 
 # open-redirect guard: unregistered redirect_uri -> error
 curl -s "$B/authorize?response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2Fevil.com&scope=openid&state=x" -u 'agent7@example.com:correct-horse-battery' | grep -qi "not registered" || fail openredir; ok "unregistered redirect_uri blocked"
+
+# inline signup on /authorize/signup -> auth code
+SLOC=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$B/authorize/signup" \
+  --data-urlencode "handle=newbie@example.com" --data-urlencode "password=correct-horse-battery" \
+  --data-urlencode "name=Newbie" --data-urlencode "client_id=$CID" \
+  --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" \
+  --data-urlencode "state=signupstate" --data-urlencode "nonce=n3")
+echo "$SLOC" | grep -q "code=ac_" || fail signup; ok "authorize/signup creates account + code"
+echo "$SLOC" | grep -q "state=signupstate" || fail signupstate; ok "signup preserves state"
 
 # operator CLI
 ./machin-idp account-new -handle ops@x -password opspassword -kind human | grep -q '"ok":true' || fail cli-acct; ok "cli account-new"

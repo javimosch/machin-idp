@@ -79,6 +79,31 @@ func b64url_str(str) (s) { s = b64url_bytes(bytes(str)) }
 // ---- Ed25519 signing key (JWT / JWKS) ----
 // Seed is IDP_ED25519_SEED (64 hex chars). A dev seed is used if unset (warned at boot).
 
+// seed_hex_valid returns 1 when h is exactly 64 hex chars (32-byte Ed25519 seed).
+func seed_hex_valid(h) (ok) {
+    ok = 0
+    if len(h) != 64 { return }
+    i := 0
+    while i < 64 {
+        c := substr(h, i, i + 1)
+        if index("0123456789abcdefABCDEF", c) < 0 { return }
+        i = i + 1
+    }
+    ok = 1
+}
+
+func check_signing_seed_at_boot() {
+    h := env("IDP_ED25519_SEED")
+    if h == "" {
+        write(2, "{\"warn\":\"IDP_ED25519_SEED not set — id_tokens signed with a DEV key; set 64 hex chars in prod\"}\n")
+        return
+    }
+    if seed_hex_valid(h) == 0 {
+        write(2, "{\"fatal\":\"IDP_ED25519_SEED must be exactly 64 hex characters (32-byte Ed25519 seed)\"}\n")
+        exit(1)
+    }
+}
+
 func signing_seed() (seed) {
     h := env("IDP_ED25519_SEED")
     if h == "" { h = "0000000000000000000000000000000000000000000000000000000000000001" }
