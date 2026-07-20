@@ -115,13 +115,26 @@ Verify signature with the Ed25519 public key from `/jwks` (`kty: OKP`, `crv: Ed2
 - Access tokens: 1 h TTL; call `/userinfo` with `Authorization: Bearer …`.
 - Redirect URIs: exact match per client (open-redirect guard).
 - Headless Basic failures: rate-limited per IP (60/min); `401` with `WWW-Authenticate: Basic realm="intrane"`, then `429` when exceeded.
+- Form login failures: same rate limit per IP (60/min); `429` with an error form when exceeded.
 - **`IDP_ED25519_SEED`**: 64 hex chars, irreplaceable — back up with the DB (see [deploy.md](deploy.md)).
 
 ## 7. Local smoke test
 
 ```sh
-./build.sh && ./test.sh   # 30+ assertions incl. portier-relevant OIDC checks
+./build.sh && ./test.sh   # 51 assertions incl. portier-relevant OIDC checks
 ```
+
+## 8. Troubleshooting (portier + machin-idp)
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| id_token verification fails | Expecting RSA/RS256 | machin-idp signs **EdDSA (Ed25519)** only — fetch `/jwks` (OKP key, not RSA) |
+| `invalid_grant` at `/token` | `redirect_uri` mismatch | The `redirect_uri` in the token request must **exact match** the one used in `/authorize` |
+| Headless agent gets `401` | Wrong Basic credentials or unknown handle | Use `Authorization: Basic` with `handle:password`; failures return `401` + `WWW-Authenticate: Basic realm="intrane"` (same shape for unknown handles — no enumeration) |
+| Headless agent gets `429` | Rate limit (60 failed Basic attempts/min per IP) | Wait one minute or use correct credentials (success path is not rate-limited) |
+| Form login loops with "invalid credentials" | Wrong password or rate limit (60/min per IP) | Same rate-limit window as headless Basic; check password and wait if throttled |
+| `unknown client_id` | Client not registered on machin-idp | `POST /v1/clients` with the exact callback URL portier uses |
+| Discovery/JWKS 404 | Wrong base URL | Use `IDP_PUBLIC_URL` / issuer exactly (e.g. `https://idp.intrane.fr`) |
 
 See also [README.md](../README.md) and live discovery at
 [https://idp.intrane.fr/.well-known/openid-configuration](https://idp.intrane.fr/.well-known/openid-configuration).

@@ -5,6 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+[ -x ./machin-idp ] || ./build.sh
+
 PORT=18798
 DB=$(mktemp -d)/test.db
 export IDP_DB="$DB" IDP_PUBLIC_URL="http://127.0.0.1:$PORT"
@@ -75,6 +77,8 @@ IDT=$(echo "$TOK" | J "['id_token']")
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "400" ] || fail onetime; ok "auth code is one-time"
 # wrong client secret -> 401
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:wrong" -d "grant_type=authorization_code&code=x&redirect_uri=y")" = "401" ] || fail clisec; ok "bad client secret -> 401"
+# malformed Basic on /token -> 401 invalid_client (no crash)
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -H 'Authorization: Basic !!!' -d 'grant_type=authorization_code&code=x&redirect_uri=y')" = "401" ] || fail badtokbasic; ok "malformed Basic on /token -> 401"
 # missing / wrong grant_type -> 400 unsupported_grant_type
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=client_credentials&code=x&redirect_uri=y")" = "400" ] || fail badgrant; ok "wrong grant_type -> 400"
 curl -s -X POST "$B/token" -u "$CID:$CSEC" -d "code=x&redirect_uri=y" | grep -q unsupported_grant_type || fail nogrant; ok "missing grant_type -> unsupported_grant_type"
@@ -92,6 +96,10 @@ assert hdr.get('kid')==jkid, (hdr, jkid)
 assert pay['iss']==iss and pay['aud']==cid and pay['sub']==sub, pay
 assert pay['email']=='agent7@example.com', pay
 assert pay.get('nonce')=='n1', pay
+import time
+now=int(time.time())
+assert abs(pay['iat']-now)<=60, pay['iat']
+assert abs(pay['exp']-(now+3600))<=60, pay['exp']
 x=b64u(json.loads(jwks)['keys'][0]['x'])
 try:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -114,6 +122,15 @@ except Exception as e: print("SIGBAD")
 PY
 )
 [ "$SIGRES" != "SIGBAD" ] || fail sigverify; ok "id_token EdDSA signature verifies against jwks ($SIGRES)"
+python3 - "$IDT" <<'PY' || fail iatexp
+import sys, json, base64, time
+def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+pay=json.loads(b64u(sys.argv[1].split('.')[1]))
+now=int(time.time())
+assert abs(pay['iat']-now)<=60, pay
+assert abs(pay['exp']-(now+3600))<=60, pay
+PY
+ok "id_token iat/exp within ±60s"
 
 # redirect_uri mismatch at token exchange -> invalid_grant
 LOC2=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=mismatch")
@@ -126,6 +143,14 @@ LOC3=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-
 CODE3=$(echo "$LOC3" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
 TOK3=$(curl -sf -X POST "$B/token" -d "grant_type=authorization_code&code=$CODE3&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&client_id=$CID&client_secret=$CSEC")
 [ -n "$(echo "$TOK3" | J "['access_token']")" ] || fail secretpost; ok "token exchange via client_secret_post"
+
+# code issued to client A, exchange with client B -> invalid_grant
+C_B=$(curl -sf -X POST "$B/v1/clients" -d '{"name":"otherapp","redirect_uris":"http://127.0.0.1:9999/cb"}')
+CID_B=$(echo "$C_B" | J "['client_id']"); CSEC_B=$(echo "$C_B" | J "['client_secret']")
+LOC_X=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=crossclient")
+CODE_X=$(echo "$LOC_X" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_X" ] || fail crosscode
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID_B:$CSEC_B" -d "grant_type=authorization_code&code=$CODE_X&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "400" ] || fail crossclient; ok "code from client A exchanged by client B -> invalid_grant"
 
 # expired auth code -> invalid_grant
 LOC4=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=expired")
@@ -150,6 +175,11 @@ sqlite3 "$DB" "UPDATE tokens SET expires_at=1 WHERE access_token='$AT'"
 # --- human form login path ---
 FLOC=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=correct-horse-battery" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formstate" --data-urlencode "nonce=n2")
 echo "$FLOC" | grep -q "code=ac_" || fail form; ok "human form login -> code"
+# wrong password on form -> error page, no auth code
+FORM_BAD=$(curl -s -o /tmp/form_bad_body -w '%{http_code}' -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=wrong-password" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formbad" --data-urlencode "nonce=n2b")
+[ "$FORM_BAD" = "200" ] || fail formbadcode
+grep -qi 'invalid credentials' /tmp/form_bad_body || fail formbadmsg; ok "form login wrong password -> error form, no code"
+! grep -q 'code=ac_' /tmp/form_bad_body || fail formbadleak; ok "form login wrong password does not leak code"
 # /authorize without creds serves the sign-in form
 curl -sf "$B/authorize?$AUTHQ" | grep -q "Sign in with intrane" || fail formhtml; ok "/authorize serves a sign-in form for browsers"
 

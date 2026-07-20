@@ -121,6 +121,11 @@ func handle_authorize_login(req) (res) {
     bad := 0
     if aok == 0 { bad = 1 } else if verify_password(password, a.salt, a.pass_hash) == 0 { bad = 1 }
     if bad == 1 {
+        if rate_allow(db, "fl:" + client_ip(req), 60, 60) == false {
+            sqlite_close(db)
+            res = response("429 Too Many Requests", "text/html; charset=utf-8", login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">too many attempts — try again later</p>"))
+            return
+        }
         sqlite_close(db)
         res = ok_html(login_form_err(public_url(req), cid, redirect_uri, scope, state, nonce))
         return
