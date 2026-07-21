@@ -38,9 +38,12 @@ A=$(curl -sf -X POST "$B/v1/accounts" -d '{"handle":"agent7@example.com","passwo
 SUB=$(echo "$A" | J "['sub']")
 [ -n "$SUB" ] || fail acct; ok "account registered ($SUB)"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/v1/accounts" -d '{"handle":"agent7@example.com","password":"another-one"}')" = "409" ] || fail dup; ok "duplicate handle -> 409"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/v1/accounts" -d '{"handle":"short@example.com","password":"short"}')" = "400" ] || fail acctshort; ok "account password < 8 chars -> 400"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/v1/accounts" -d '{"password":"longenough"}')" = "400" ] || fail acctnohandle; ok "account missing handle -> 400"
 C=$(curl -sf -X POST "$B/v1/clients" -d '{"name":"testapp","redirect_uris":"http://127.0.0.1:9999/cb"}')
 CID=$(echo "$C" | J "['client_id']"); CSEC=$(echo "$C" | J "['client_secret']")
 [ -n "$CSEC" ] || fail client; ok "client registered ($CID)"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/v1/clients" -d '{"name":"noredir"}')" = "400" ] || fail clinoredir; ok "client missing redirect_uris -> 400"
 
 AUTHQ="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid%20email&state=xyz&nonce=n1"
 
@@ -303,6 +306,15 @@ UI_BEAR=$(curl -sf "$B/userinfo" -H "Authorization: bearer $AT")
 sqlite3 "$DB" "UPDATE tokens SET expires_at=1 WHERE access_token='$AT'"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$B/userinfo" -H "Authorization: Bearer $AT")" = "401" ] || fail atexp; ok "expired access_token -> 401"
 
+# code issued, then account deleted -> invalid_grant at /token
+curl -sf -X POST "$B/v1/accounts" -d '{"handle":"ghost@example.com","password":"correct-horse-battery","kind":"agent"}' >/dev/null
+LOC_GHOST=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'ghost@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=ghost")
+CODE_GHOST=$(echo "$LOC_GHOST" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_GHOST" ] || fail ghostcode
+sqlite3 "$DB" "DELETE FROM accounts WHERE handle='ghost@example.com'"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_GHOST&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "400" ] || fail ghostgrant; ok "deleted account at token exchange -> invalid_grant"
+curl -s -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_GHOST&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb" | grep -q invalid_grant || fail ghostgrantbody; ok "deleted account token error is invalid_grant"
+
 # --- human form login path ---
 FLOC=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=correct-horse-battery" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formstate" --data-urlencode "nonce=n2")
 echo "$FLOC" | grep -q "code=ac_" || fail form; ok "human form login -> code"
@@ -341,6 +353,33 @@ SLOC=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$B/authorize/signup" \
   --data-urlencode "state=signupstate" --data-urlencode "nonce=n3")
 echo "$SLOC" | grep -q "code=ac_" || fail signup; ok "authorize/signup creates account + code"
 echo "$SLOC" | grep -q "state=signupstate" || fail signupstate; ok "signup preserves state"
+# signup duplicate handle -> error form, no auth code
+SIGNUP_DUP=$(curl -s -o /tmp/signup_dup_body -w '%{http_code}' -X POST "$B/authorize/signup" \
+  --data-urlencode "handle=newbie@example.com" --data-urlencode "password=correct-horse-battery" \
+  --data-urlencode "name=Dupe" --data-urlencode "client_id=$CID" \
+  --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" \
+  --data-urlencode "state=signupdup")
+[ "$SIGNUP_DUP" = "200" ] || fail signupdupcode
+grep -qi 'handle is taken' /tmp/signup_dup_body || fail signupdupmsg; ok "signup duplicate handle -> error form, no code"
+! grep -q 'code=ac_' /tmp/signup_dup_body || fail signupduleak; ok "signup duplicate handle does not leak code"
+# signup password too short -> error form, no auth code
+SIGNUP_SHORT=$(curl -s -o /tmp/signup_short_body -w '%{http_code}' -X POST "$B/authorize/signup" \
+  --data-urlencode "handle=shortpw@example.com" --data-urlencode "password=short" \
+  --data-urlencode "name=Short" --data-urlencode "client_id=$CID" \
+  --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" \
+  --data-urlencode "state=signupshort")
+[ "$SIGNUP_SHORT" = "200" ] || fail signupshortcode
+grep -qi 'min 8 chars' /tmp/signup_short_body || fail signupshortmsg; ok "signup password < 8 chars -> error form, no code"
+! grep -q 'code=ac_' /tmp/signup_short_body || fail signupshortleak; ok "signup short password does not leak code"
+# signup invalid client/redirect -> html error, no open redirect
+SIGNUP_BAD=$(curl -s -o /tmp/signup_bad_body -w '%{http_code}' -X POST "$B/authorize/signup" \
+  --data-urlencode "handle=fresh@example.com" --data-urlencode "password=correct-horse-battery" \
+  --data-urlencode "name=Fresh" --data-urlencode "client_id=cid_nope" \
+  --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" \
+  --data-urlencode "state=signupbad")
+[ "$SIGNUP_BAD" = "400" ] || fail signupbadcode
+grep -qi 'invalid client/redirect' /tmp/signup_bad_body || fail signupbadmsg; ok "signup invalid client/redirect -> error, no redirect"
+! grep -q 'code=ac_' /tmp/signup_bad_body || fail signupbadleak; ok "signup invalid client does not leak code"
 
 # operator CLI
 ./machin-idp account-new -handle ops@x -password opspassword -kind human | grep -q '"ok":true' || fail cli-acct; ok "cli account-new"
@@ -391,5 +430,21 @@ echo "$KID_OUT" | grep -q 'IDP_KID must be alphanumeric' || fail badkidmsg; ok "
 kill $SRV2 2>/dev/null || true
 unset IDP_KID
 export IDP_DB="$DB" IDP_PUBLIC_URL="http://127.0.0.1:$PORT"
+
+# --- API registration rate limits (per IP) ---
+for i in $(seq 1 30); do curl -s -o /dev/null -X POST "$B/v1/accounts" -d "{\"handle\":\"rlacct$i@example.com\",\"password\":\"correct-horse-battery\"}"; done
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/v1/accounts" -d '{"handle":"rlacct31@example.com","password":"correct-horse-battery"}')" = "429" ] || fail acctrl; ok "31st account registration from same IP -> 429"
+for i in $(seq 1 20); do curl -s -o /dev/null -X POST "$B/v1/clients" -d "{\"name\":\"rlcli$i\",\"redirect_uris\":\"http://127.0.0.1:9$i/cb\"}"; done
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/v1/clients" -d '{"name":"rlcli21","redirect_uris":"http://127.0.0.1:9921/cb"}')" = "429" ] || fail clientrl; ok "21st client registration from same IP -> 429"
+for i in $(seq 1 30); do curl -s -o /dev/null -X POST "$B/authorize/signup" \
+  --data-urlencode "handle=surl$i@example.com" --data-urlencode "password=correct-horse-battery" \
+  --data-urlencode "name=SU$i" --data-urlencode "client_id=$CID" \
+  --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" \
+  --data-urlencode "state=surl$i"; done
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/authorize/signup" \
+  --data-urlencode "handle=surl31@example.com" --data-urlencode "password=correct-horse-battery" \
+  --data-urlencode "name=SU31" --data-urlencode "client_id=$CID" \
+  --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" \
+  --data-urlencode "state=surl31")" = "429" ] || fail signuprl; ok "31st authorize/signup from same IP -> 429"
 
 echo "ALL $P TESTS PASSED"
