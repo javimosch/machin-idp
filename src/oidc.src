@@ -139,8 +139,8 @@ func handle_authorize_login(req) (res) {
     res = rr
 }
 
-// POST /authorize/signup — the signup form submit: free self-registration during "Login with
-// intrane", then straight into the OIDC redirect (so a brand-new member completes `hart join` in
+// POST /authorize/signup — the signup form submit: free self-registration during login,
+// then straight into the OIDC redirect (so a brand-new member completes join flows in
 // one go). Same open policy as POST /v1/accounts (rate-limited).
 func handle_authorize_signup(req) (res) {
     db := db_open()

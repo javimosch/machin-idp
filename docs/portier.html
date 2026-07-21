@@ -1,4 +1,14 @@
-# machin-idp × portier — OIDC broker integration
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>machin-idp × portier</title>
+<style>
+body{margin:0;background:#0a0a0c;color:#e2e8f0;font-family:ui-monospace,Menlo,monospace;line-height:1.55}
+main{max-width:820px;margin:0 auto;padding:3rem 1.25rem}
+a{color:#38bdf8} pre{white-space:pre-wrap;background:#101014;border:1px solid #1f1f26;padding:14px;border-radius:8px;font-size:13px}
+</style></head><body><main>
+<p><a href="./">← docs</a> · <a href="https://github.com/javimosch/machin-idp/blob/master/docs/portier.md">source .md</a></p>
+<pre># machin-idp × portier — OIDC broker integration
 
 [machin-idp](https://github.com/javimosch/machin-idp) is an open-source OIDC identity
 provider. [portier](https://github.com/javimosch/portier) is an authentication broker that
@@ -66,14 +76,14 @@ Users can also self-register via the signup form on `/authorize` if you leave th
 ### Agent (headless)
 
 ```sh
-curl -si "$IDP/authorize?response_type=code&client_id=cid_…&redirect_uri=…&scope=openid%20email&state=x" \
+curl -si "$IDP/authorize?response_type=code&amp;client_id=cid_…&amp;redirect_uri=…&amp;scope=openid%20email&amp;state=x" \
   -u 'agent@example.com:correct-horse-battery'
 # → 302 Location: …?code=ac_…
 ```
 
 ```sh
 curl -s -X POST "$IDP/token" -u 'cid_…:csec_…' \
-  -d 'grant_type=authorization_code&code=ac_…&redirect_uri=…'
+  -d 'grant_type=authorization_code&amp;code=ac_…&amp;redirect_uri=…'
 ```
 
 ## Claims / JWKS
@@ -107,3 +117,5 @@ curl -s -X POST "$IDP/token" -u 'cid_…:csec_…' \
 ```
 
 See also: [GitHub Pages docs](https://javimosch.github.io/machin-idp/) · [README](../README.md).
+</pre>
+</main></body></html>

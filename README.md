@@ -1,30 +1,35 @@
-# Login with Intrane — powered by open-source **machin-idp**
+# machin-idp — OIDC for humans and agents
 
-**Login with Intrane** is Intrane’s free hosted OIDC identity provider at
-**https://idp.intrane.fr**. Under the hood it runs **machin-idp** — an OSS
-[machin (MFL)](https://github.com/javimosch/machin) binary you can also self-host
-under any brand.
+An **open-source OIDC identity provider** for the agent era. Standards OIDC
+(discovery, JWKS, **EdDSA-signed id_tokens**). Principals can be **humans or agents**;
+login works **headlessly** — no browser UI required. One static
+[machin (MFL)](https://github.com/javimosch/machin) binary — EdDSA JWTs, PBKDF2
+passwords, no RSA, no runtime.
 
-Standards OIDC (discovery, JWKS, **EdDSA-signed id_tokens**). Principals can be
-**humans or agents**; login works **headlessly** — no browser UI required. Apps offer
-"Login with Intrane" instead of "Login with Google".
+**Docs (GitHub Pages):** https://javimosch.github.io/machin-idp/
 
-| | |
-|--|--|
-| **OSS** | This repo — clone, `./build.sh`, run your own IdP |
-| **Hosted** | `idp.intrane.fr` — free Intrane deployment (not péage-metered; portier meters auths) |
+Self-host under **your** brand. There is no public hosted IdP SKU for this project.
 
-Live: **https://idp.intrane.fr** · [`/.well-known/openid-configuration`](https://idp.intrane.fr/.well-known/openid-configuration) · [`/llms.txt`](https://idp.intrane.fr/llms.txt)
+> Side note: machin-idp is part of the [intrane.fr](https://intrane.fr) OSS toolkit
+> (alongside [portier](https://github.com/javimosch/portier), péage, relais). Operator
+> deployments of those products are separate from this repo’s docs.
 
-## Register a principal + a client
+## Quick start
 
 ```sh
-# a principal — human or agent
-curl -s -X POST https://idp.intrane.fr/v1/accounts \
+./build.sh    # -> ./machin-idp
+export IDP_PUBLIC_URL=http://127.0.0.1:8798
+export IDP_ED25519_SEED=$(openssl rand -hex 32)
+./machin-idp serve -port 8798
+```
+
+```sh
+# register a principal — human or agent
+curl -s -X POST http://127.0.0.1:8798/v1/accounts \
   -d '{"handle":"agent7@example.com","password":"correct-horse-battery","kind":"agent"}'
 
-# an OIDC client (your app; or point portier at it)
-curl -s -X POST https://idp.intrane.fr/v1/clients \
+# register an OIDC client (your app, or point a broker like portier at it)
+curl -s -X POST http://127.0.0.1:8798/v1/clients \
   -d '{"name":"my app","redirect_uris":"https://myapp/cb"}'
 # -> {client_id, client_secret}
 ```
@@ -33,27 +38,24 @@ curl -s -X POST https://idp.intrane.fr/v1/clients \
 
 ```sh
 # agent: HTTP Basic on /authorize returns the auth code, no browser
-curl -si "https://idp.intrane.fr/authorize?response_type=code&client_id=cid_…&redirect_uri=…&scope=openid%20email&state=x" \
+curl -si "http://127.0.0.1:8798/authorize?response_type=code&client_id=cid_…&redirect_uri=…&scope=openid%20email&state=x" \
   -u 'agent7@example.com:correct-horse-battery'
 # -> 302 Location: …?code=ac_…
 
 # exchange it (client-authenticated) for an EdDSA id_token + access_token
-curl -s -X POST https://idp.intrane.fr/token -u 'cid_…:csec_…' \
+curl -s -X POST http://127.0.0.1:8798/token -u 'cid_…:csec_…' \
   -d 'grant_type=authorization_code&code=ac_…&redirect_uri=…'
 ```
 
-A human hitting `/authorize` without credentials gets a minimal sign-in form instead.
-Verify the `id_token` against [`/jwks`](https://idp.intrane.fr/jwks) (Ed25519 OKP), or
-call `/userinfo` with the access token.
+A human hitting `/authorize` without credentials gets a minimal sign-in form.
+Verify the `id_token` against `/jwks` (Ed25519 OKP), or call `/userinfo` with the
+access token. Discovery: `/.well-known/openid-configuration`.
 
-## Plugs into portier
+## Brokers (e.g. portier)
 
-Register machin-idp as a generic OIDC provider in [portier](https://portier.intrane.fr)
-and your apps get "Login with Intrane" through the same broker they use for Google/GitHub.
-**Step-by-step integration:** [docs/portier.md](docs/portier.md) (client registration, discovery,
-EdDSA JWKS, human vs agent flows, dogfood client `cid_06149ff79342cab4`).
-The intrane agent-web stack: **[péage](https://peage.intrane.fr)** (pay) ·
-**[relais](https://github.com/javimosch/relais)** (receive) · **[portier](https://portier.intrane.fr)** (authenticate) · **machin-idp** (the identity behind it).
+Register machin-idp as a generic OIDC provider in any broker (including
+[portier](https://github.com/javimosch/portier)). Step-by-step:
+[docs/portier.md](docs/portier.md).
 
 ## Why EdDSA
 
@@ -62,11 +64,11 @@ without a shared secret. machin has no RSA — but it has **Ed25519** (`ed25519_
 `ed25519_pub`), and JWT's `EdDSA` alg is exactly that. Modern, 32-byte keys, pure MFL.
 Independently verified: the id_tokens pass Python `cryptography`'s Ed25519 check.
 
-## Build & run
+## Build & test
 
 ```sh
 ./build.sh    # -> ./machin-idp
-./test.sh     # 102 assertion OIDC e2e incl. EdDSA-verify-against-jwks, headless + form login
+./test.sh     # OIDC e2e incl. EdDSA-verify-against-jwks, headless + form login
 ```
 
 Env: `IDP_DB` · `IDP_PUBLIC_URL` · `IDP_ED25519_SEED` (64 hex — the signing key; set in
@@ -84,7 +86,7 @@ machin-idp feedback "headless login returned 401 with a valid password" -kind bu
 ```
 
 Dual-writes: to machin-idp's own `POST /v1/feedback` (stored locally) **and**, best-effort, to
-a central relay so one inbox spans every intrane CLI. Open intake — no token, 16 KB cap,
+a central relay so one inbox spans every CLI in the toolkit. Open intake — no token, 16 KB cap,
 idempotent on a client-supplied id. `FEEDBACK_RELAY` retargets the relay (`off` disables);
 `IDP_URL`/`IDP_PUBLIC_URL` retarget the app endpoint. Follows the [cli-feedback-spec](https://github.com/javimosch/cli-feedback-spec) convention
 (reference relay: [machin-feedback](https://github.com/javimosch/machin-feedback)).
