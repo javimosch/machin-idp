@@ -1,15 +1,15 @@
 // Agent-facing docs.
 
 func llms_txt(base) (t) {
-    t = "# machin-idp — an identity provider for the agent era ('Login with intrane')\n\n" +
+    t = "# machin-idp — an open-source OIDC identity provider for the agent era\n\n" +
         "A standards OIDC provider (EdDSA-signed id_tokens, discovery, JWKS) where the\n" +
         "principals can be humans OR agents, and login works headlessly — no browser UI\n" +
-        "required. Apps offer 'Login with intrane' instead of 'Login with Google'.\n" +
-        "Base URL: " + base + "\n\n" +
+        "required. Self-host under your brand. Docs: https://javimosch.github.io/machin-idp/\n" +
+        "Base URL (this instance): " + base + "\n\n" +
         "## Register a principal (human or agent)\n\n" +
         "   curl -s -X POST " + base + "/v1/accounts -d '{\"handle\":\"me@example.com\",\"password\":\"correct-horse\",\"kind\":\"agent\"}'\n" +
-        "   -> {\"sub\":\"u_..\"}. This identity can now sign in to any app that offers intrane login.\n\n" +
-        "## Register an OIDC client (your app, or point portier at it)\n\n" +
+        "   -> {\"sub\":\"u_..\"}. This identity can sign in to any app that uses this IdP.\n\n" +
+        "## Register an OIDC client (your app, or point a broker at it)\n\n" +
         "   curl -s -X POST " + base + "/v1/clients -d '{\"name\":\"my app\",\"redirect_uris\":\"https://myapp/cb\"}'\n" +
         "   -> {\"client_id\":\"cid_..\",\"client_secret\":\"csec_..\"}\n" +
         "   Discovery: " + base + "/.well-known/openid-configuration\n\n" +
@@ -35,20 +35,20 @@ func llms_txt(base) (t) {
         "GET  /userinfo    Bearer access_token -> claims\n\n" +
         "Signing: EdDSA (Ed25519) — modern, small keys, pure MFL. id_tokens carry\n" +
         "{iss, sub, aud, iat, exp, email, name}.\n\n" +
-        "## portier integration\n\n" +
-        "Register machin-idp as a generic OIDC provider in portier for 'Login with intrane'.\n" +
-        "Step-by-step: " + base + "/guide (JSON) and docs/portier.md in the repo.\n"
+        "## Broker integration (e.g. portier)\n\n" +
+        "Register machin-idp as a generic OIDC provider in your broker.\n" +
+        "Step-by-step: https://javimosch.github.io/machin-idp/portier.html or docs/portier.md.\n"
 }
 
 func guide_json(base) (j) {
     j = "{\"name\":\"machin-idp\",\"version\":\"" + app_version() + "\",\"tagline\":\"an OIDC identity provider for the agent era — humans and agents, headless login, EdDSA id_tokens\"," +
         "\"base_url\":" + json(base) + ",\"id_token_alg\":\"EdDSA\",\"discovery\":" + json(base + "/.well-known/openid-configuration") + ",\"jwks\":" + json(base + "/jwks") + "," +
         "\"flow\":[\"POST /v1/accounts -> a principal\",\"POST /v1/clients -> client_id + secret\",\"GET /authorize (Basic for agents, form for humans) -> code\",\"POST /token -> access_token + EdDSA id_token\",\"GET /userinfo\"]," +
-        "\"portier\":{\"docs\":\"https://github.com/javimosch/machin-idp/blob/master/docs/portier.md\",\"provider_kind\":\"oidc\",\"provider_name\":\"intrane\"}}"
+        "\"docs\":\"https://javimosch.github.io/machin-idp/\",\"portier\":{\"docs\":\"https://javimosch.github.io/machin-idp/portier.html\",\"provider_kind\":\"oidc\"}}"
 }
 
 func help_text() (h) {
-    h = "machin-idp — OIDC identity provider (Login with intrane), agent-first\n\n" +
+    h = "machin-idp — open-source OIDC identity provider, agent-first\n\n" +
         "usage: machin-idp <command>\n\n" +
         "  serve [-port 8798]        run the HTTP service\n" +
         "  account-new -handle x -password y [-name z] [-kind agent|human]\n" +

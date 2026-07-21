@@ -38,7 +38,7 @@ func cmd_feedback(a) {
     payload := "{\"app\":\"idp\",\"version\":" + json(app_version()) + ",\"kind\":" + json(kind) + ",\"message\":" + json(msg) + ",\"context\":" + json(ctx) + ",\"reporter\":" + json(reporter) + ",\"id\":" + json(id) + "}"
     app := env("IDP_URL")
     if app == "" { app = env("IDP_PUBLIC_URL") }
-    if app == "" { app = "https://idp.intrane.fr" }
+    if app == "" { app = "http://127.0.0.1:8798" }
     stored := fb_post(app + "/v1/feedback", payload)
     relay := env("FEEDBACK_RELAY")
     if relay == "" { relay = "https://feedback.intrane.fr" }

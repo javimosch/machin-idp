@@ -36,7 +36,7 @@ func handle_account_create(req) (res) {
     sqlite_exec(db, "INSERT INTO accounts(sub, handle, name, pass_hash, salt, kind, created_at) VALUES(?,?,?,?,?,?,?)", []string{sub, handle, name, ph, salt, kind, str(now())})
     sqlite_close(db)
     write(2, "{\"event\":\"account_created\",\"sub\":\"" + sub + "\",\"kind\":\"" + kind + "\"}\n")
-    res = created("{\"ok\":1,\"sub\":\"" + sub + "\",\"handle\":" + json(handle) + ",\"kind\":\"" + kind + "\",\"note\":\"this principal can now log in via any app that offers 'Login with intrane'. Agents authenticate headlessly (Authorization: Basic handle:password on /authorize).\"}")
+    res = created("{\"ok\":1,\"sub\":\"" + sub + "\",\"handle\":" + json(handle) + ",\"kind\":\"" + kind + "\",\"note\":\"this principal can now log in via any app that uses this IdP. Agents authenticate headlessly (Authorization: Basic handle:password on /authorize).\"}")
 }
 
 func handle_client_create(req) (res) {

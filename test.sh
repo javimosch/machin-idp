@@ -22,7 +22,7 @@ fail(){ echo "FAIL: $1"; exit 1; }
 P=0; ok(){ P=$((P+1)); echo "ok $P - $1"; }
 
 curl -sf "$B/_health" | grep -q '"ok":1' || fail health; ok health
-curl -sf "$B/llms.txt" | grep -q "Login with intrane" || fail llms; ok llms.txt
+curl -sf "$B/llms.txt" | grep -q "open-source OIDC" || fail llms; ok llms.txt
 # discovery + jwks
 D=$(curl -sf "$B/.well-known/openid-configuration")
 [ "$(echo "$D" | J "['id_token_signing_alg_values_supported'][0]")" = "EdDSA" ] || fail disc; ok "discovery advertises EdDSA"
