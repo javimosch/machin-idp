@@ -145,7 +145,11 @@ func handle_authorize_login(req) (res) {
 func handle_authorize_signup(req) (res) {
     db := db_open()
     if db == 0 { res = html_error("db error")  return }
-    if rate_allow(db, "su:" + client_ip(req), 3600, 30) == false { sqlite_close(db)  res = html_error("too many sign-ups — try again later")  return }
+    if rate_allow(db, "su:" + client_ip(req), 3600, 30) == false {
+        sqlite_close(db)
+        res = response("429 Too Many Requests", "text/html; charset=utf-8", "<!doctype html><meta charset=utf-8><body style=\"font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;padding:2rem\"><h2 style=\"color:#f87171\">machin-idp: too many sign-ups — try again later</h2></body>")
+        return
+    }
     handle := form_field(req.body, "handle")
     password := form_field(req.body, "password")
     name := form_field(req.body, "name")

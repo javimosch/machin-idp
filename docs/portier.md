@@ -120,13 +120,15 @@ distinguish browser users from headless agents.
 - Headless Basic failures: rate-limited per IP (60/min); `401` with `WWW-Authenticate: Basic realm="intrane"`, then `429` when exceeded.
 - Form login failures: same rate limit per IP (60/min); `429` with an error form when exceeded. Successful form login is not rate-limited.
 - Token endpoint client auth failures: rate-limited per IP (60/min); `401 invalid_client`, then `429 too_many_requests`.
+- Self-service signup (`POST /authorize/signup`): rate-limited per IP (30/h); `429` with an error page when exceeded.
+- API registration: `POST /v1/accounts` rate-limited per IP (30/h); `POST /v1/clients` rate-limited per IP (20/h).
 - **`IDP_ED25519_SEED`**: 64 hex chars, irreplaceable — back up with the DB (see [deploy.md](deploy.md)).
 - **`IDP_KID`**: optional JWT/JWKS key id (default `idp-ed25519-1`); must be alphanumeric plus `.`, `_`, `-` — quotes or JSON metacharacters abort boot.
 
 ## 7. Local smoke test
 
 ```sh
-./build.sh && ./test.sh   # 88 assertions incl. portier-relevant OIDC checks
+./build.sh && ./test.sh   # 102 assertions incl. portier-relevant OIDC checks
 ```
 
 ## 8. Troubleshooting (portier + machin-idp)
@@ -139,6 +141,9 @@ distinguish browser users from headless agents.
 | Headless agent gets `429` | Rate limit (60 failed Basic attempts/min per IP) | Wait one minute or use correct credentials (success path is not rate-limited) |
 | `/token` returns `429 too_many_requests` | Rate limit (60 failed client auth attempts/min per IP) | Wait one minute; valid client credentials still work after the window |
 | Form login loops with "invalid credentials" | Wrong password or rate limit (60/min per IP) | Same rate-limit window as headless Basic; check password and wait if throttled |
+| `429 too many registrations` on `POST /v1/accounts` | API registration rate limit (30/h per IP) | Wait one hour or register via operator CLI (`machin-idp account-new`) |
+| `429 too many clients` on `POST /v1/clients` | Client registration rate limit (20/h per IP) | Wait one hour or use operator CLI (`machin-idp client-new`) |
+| Signup form shows "too many sign-ups" | Self-service signup rate limit (30/h per IP) | Wait one hour or create the account via `POST /v1/accounts` / operator CLI |
 | `unknown client_id` | Client not registered on machin-idp | `POST /v1/clients` with the exact callback URL portier uses |
 | Discovery/JWKS 404 | Wrong base URL | Use `IDP_PUBLIC_URL` / issuer exactly (e.g. `https://idp.intrane.fr`) |
 
