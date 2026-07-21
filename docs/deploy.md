@@ -1,6 +1,7 @@
 # Deploy — dk1
 
 Live at **https://idp.intrane.fr** -> 127.0.0.1:8798 (hotify/Traefik TLS).
+Hosted brand: **Login with Intrane** (free). OSS binary/repo: **machin-idp**.
 - `/opt/machin-idp/machin-idp` (dir owned dk1), `/opt/machin-idp/data.db` (WAL)
 - `/etc/machin-idp/idp.env` (640): IDP_DB, IDP_PUBLIC_URL, **IDP_ED25519_SEED** (the signing
   key — IRREPLACEABLE: losing it invalidates every issued token and breaks JWKS trust;

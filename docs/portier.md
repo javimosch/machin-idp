@@ -1,7 +1,7 @@
 # machin-idp × portier — Login with intrane
 
 [machin-idp](https://github.com/javimosch/machin-idp) is the OIDC identity provider behind
-portier's **Login with intrane**. [portier](https://github.com/javimosch/portier) is the
+**Login with Intrane**. [portier](https://portier.intrane.fr) is the
 authentication broker in the intrane stack (alongside [péage](https://peage.intrane.fr) and
 [relais](https://github.com/javimosch/relais)).
 
@@ -22,7 +22,7 @@ portier's OAuth callback URL.
 
 ```sh
 curl -s -X POST https://idp.intrane.fr/v1/clients \
-  -d '{"name":"portier","redirect_uris":"https://portier.example/cb"}'
+  -d '{"name":"portier","redirect_uris":"https://portier.intrane.fr/cb/intrane"}'
 # → {"client_id":"cid_…","client_secret":"csec_…"}   # save the secret — shown once
 ```
 
