@@ -10,5 +10,5 @@ behind portier's "Login with intrane".
 - Stored JSON columns: emit via struct parse, not json_get (double-encodes) — same as relais/portier.
 - Security: auth codes one-time + 10min TTL; access tokens 1h; redirect_uri exact-match per client (open-redirect guard); client_secret + account password stored HASHED (sha256 for client secret, pbkdf2 for passwords).
 - **IDP_ED25519_SEED is IRREPLACEABLE** (losing it invalidates all tokens + breaks JWKS trust) — back up with the DB. env /etc/machin-idp/idp.env 640.
-- NOT peage-metered (it's Javier's own free IdP infra; portier does the per-auth metering). Deploy: dk1 /opt/machin-idp, systemd :8798, hotify idp.intrane.fr.
+- NOT peage-metered (Javier’s free IdP infra; portier does per-auth metering). Deploy: dk1 /opt/machin-idp, systemd :8798, hotify idp.intrane.fr. Product story: hosted brand = “Login with Intrane”; OSS binary/repo = machin-idp.
 - Dogfood proven: portier client cid_06149ff79342cab4; provider kind=oidc name=intrane; full Login-with-intrane chain live (agent headless).

@@ -1,9 +1,18 @@
-# machin-idp — Login with intrane, for humans and agents
+# Login with Intrane — powered by open-source **machin-idp**
 
-An **OIDC identity provider for the agent era**. A standards OIDC provider (discovery,
-JWKS, **EdDSA-signed id_tokens**) whose principals can be **humans or agents**, and whose
-login works **headlessly** — no browser UI required. Your apps offer "Login with intrane"
-instead of "Login with Google". One static [machin (MFL)](https://github.com/javimosch/machin) binary — EdDSA JWTs, PBKDF2 passwords, no RSA, no runtime.
+**Login with Intrane** is Intrane’s free hosted OIDC identity provider at
+**https://idp.intrane.fr**. Under the hood it runs **machin-idp** — an OSS
+[machin (MFL)](https://github.com/javimosch/machin) binary you can also self-host
+under any brand.
+
+Standards OIDC (discovery, JWKS, **EdDSA-signed id_tokens**). Principals can be
+**humans or agents**; login works **headlessly** — no browser UI required. Apps offer
+"Login with Intrane" instead of "Login with Google".
+
+| | |
+|--|--|
+| **OSS** | This repo — clone, `./build.sh`, run your own IdP |
+| **Hosted** | `idp.intrane.fr` — free Intrane deployment (not péage-metered; portier meters auths) |
 
 Live: **https://idp.intrane.fr** · [`/.well-known/openid-configuration`](https://idp.intrane.fr/.well-known/openid-configuration) · [`/llms.txt`](https://idp.intrane.fr/llms.txt)
 
@@ -39,10 +48,10 @@ call `/userinfo` with the access token.
 
 ## Plugs into portier
 
-Register machin-idp as a generic OIDC provider in [portier](https://github.com/javimosch/portier)
-and your apps get "Login with intrane" through the same broker they use for Google/GitHub.
+Register machin-idp as a generic OIDC provider in [portier](https://portier.intrane.fr)
+and your apps get "Login with Intrane" through the same broker they use for Google/GitHub.
 The intrane agent-web stack: **[péage](https://peage.intrane.fr)** (pay) ·
-**[relais](https://github.com/javimosch/relais)** (receive) · **[portier](https://github.com/javimosch/portier)** (authenticate) · **machin-idp** (the identity behind it).
+**[relais](https://github.com/javimosch/relais)** (receive) · **[portier](https://portier.intrane.fr)** (authenticate) · **machin-idp** (the identity behind it).
 
 ## Why EdDSA
 
