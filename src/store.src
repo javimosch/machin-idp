@@ -14,6 +14,7 @@ func db_open() (db) {
     if db == 0 { return }
     sqlite_exec(db, "PRAGMA journal_mode=WAL")
     sqlite_exec(db, "PRAGMA busy_timeout=5000")
+    db_migrate(db)
 }
 
 func db_migrate(db) {
@@ -79,6 +80,47 @@ func b64url_str(str) (s) { s = b64url_bytes(bytes(str)) }
 // ---- Ed25519 signing key (JWT / JWKS) ----
 // Seed is IDP_ED25519_SEED (64 hex chars). A dev seed is used if unset (warned at boot).
 
+// seed_hex_valid returns 1 when h is exactly 64 hex chars (32-byte Ed25519 seed).
+func seed_hex_valid(h) (ok) {
+    ok = 0
+    if len(h) != 64 { return }
+    i := 0
+    while i < 64 {
+        c := substr(h, i, i + 1)
+        if index("0123456789abcdefABCDEF", c) < 0 { return }
+        i = i + 1
+    }
+    ok = 1
+}
+
+// kid_safe rejects values that would break JWT/JWKS JSON (quotes, backslashes, control chars).
+func kid_safe(k) (ok) {
+    ok = 1
+    i := 0
+    while i < len(k) {
+        c := substr(k, i, i + 1)
+        if index("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-", c) < 0 { ok = 0  return }
+        i = i + 1
+    }
+}
+
+func check_signing_seed_at_boot() {
+    h := env("IDP_ED25519_SEED")
+    if h == "" {
+        write(2, "{\"warn\":\"IDP_ED25519_SEED not set — id_tokens signed with a DEV key; set 64 hex chars in prod\"}\n")
+        return
+    }
+    if seed_hex_valid(h) == 0 {
+        write(2, "{\"fatal\":\"IDP_ED25519_SEED must be exactly 64 hex characters (32-byte Ed25519 seed)\"}\n")
+        exit(1)
+    }
+    k := env("IDP_KID")
+    if k != "" && kid_safe(k) == 0 {
+        write(2, "{\"fatal\":\"IDP_KID must be alphanumeric plus . _ - (no quotes or JSON metacharacters)\"}\n")
+        exit(1)
+    }
+}
+
 func signing_seed() (seed) {
     h := env("IDP_ED25519_SEED")
     if h == "" { h = "0000000000000000000000000000000000000000000000000000000000000001" }
@@ -91,7 +133,15 @@ func signing_kid() (k) {
 }
 
 // jwt_eddsa builds a compact EdDSA JWT from a claims JSON string.
+// Rejects malformed claims before signing — a broken payload must not leave the IdP.
 func jwt_eddsa(claims_json) (jwt) {
+    jwt = ""
+    _, err := json_get(claims_json, ".iss")
+    if err != "" { return }
+    _, err = json_get(claims_json, ".sub")
+    if err != "" { return }
+    _, err = json_get(claims_json, ".aud")
+    if err != "" { return }
     header := "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"" + signing_kid() + "\"}"
     signing_input := b64url_str(header) + "." + b64url_str(claims_json)
     sig := ed25519_sign(signing_seed(), bytes(signing_input))

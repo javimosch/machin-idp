@@ -50,6 +50,8 @@ call `/userinfo` with the access token.
 
 Register machin-idp as a generic OIDC provider in [portier](https://portier.intrane.fr)
 and your apps get "Login with Intrane" through the same broker they use for Google/GitHub.
+**Step-by-step integration:** [docs/portier.md](docs/portier.md) (client registration, discovery,
+EdDSA JWKS, human vs agent flows, dogfood client `cid_06149ff79342cab4`).
 The intrane agent-web stack: **[péage](https://peage.intrane.fr)** (pay) ·
 **[relais](https://github.com/javimosch/relais)** (receive) · **[portier](https://portier.intrane.fr)** (authenticate) · **machin-idp** (the identity behind it).
 
@@ -64,7 +66,7 @@ Independently verified: the id_tokens pass Python `cryptography`'s Ed25519 check
 
 ```sh
 ./build.sh    # -> ./machin-idp
-./test.sh     # 24-assertion OIDC e2e incl. EdDSA-verify-against-jwks, headless + form login
+./test.sh     # 102 assertion OIDC e2e incl. EdDSA-verify-against-jwks, headless + form login
 ```
 
 Env: `IDP_DB` · `IDP_PUBLIC_URL` · `IDP_ED25519_SEED` (64 hex — the signing key; set in

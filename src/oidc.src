@@ -43,6 +43,18 @@ func issue_code_redirect(db, cid, sub, redirect_uri, scope, state, nonce) (res) 
     res = redirect(dest)
 }
 
+// 401 for failed/malformed headless Basic auth — RFC 7617 realm + no info leak.
+func basic_auth_unauthorized() (res) {
+    res = response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"invalid credentials\"}")
+    res = with_header(res, "WWW-Authenticate", "Basic realm=\"intrane\"")
+}
+
+// 429 when headless Basic auth failures are rate-limited (same body shape, no leak).
+func basic_auth_rate_limited() (res) {
+    res = response("429 Too Many Requests", "application/json", "{\"ok\":0,\"error\":\"too many attempts\"}")
+    res = with_header(res, "WWW-Authenticate", "Basic realm=\"intrane\"")
+}
+
 // GET /authorize — headless (Authorization: Basic handle:password) for agents, else a form.
 func handle_authorize(req) (res) {
     db := db_open()
@@ -51,23 +63,40 @@ func handle_authorize(req) (res) {
     if err != "" { sqlite_close(db)  res = html_error(err)  return }
 
     // headless agent path: HTTP Basic with the principal's handle:password
+    // Treat any "Basic" scheme as headless — empty/malformed creds must 401, not fall through to the form.
     auth := header(req, "authorization")
-    if has_prefix(to_lower(auth), "basic ") {
-        dec := base64_decode(trim(substr(auth, 6, len(auth))))
-        ci := index(dec, ":")
+    if has_prefix(to_lower(auth), "basic") {
+        b64 := trim(substr(auth, 5, len(auth)))
+        dec := ""
+        ci := -1
+        if b64 != "" {
+            dec = base64_decode(b64)
+            ci = index(dec, ":")
+        }
         if ci > 0 {
             handle := substr(dec, 0, ci)
             password := substr(dec, ci + 1, len(dec))
-            a, aok := account_by_handle(db, handle)
-            if aok == 1 && verify_password(password, a.salt, a.pass_hash) == 1 {
-                r := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce)
-                sqlite_close(db)
-                res = r
-                return
+            // Require non-empty handle and password — empty either is always invalid.
+            if handle != "" && password != "" {
+                a, aok := account_by_handle(db, handle)
+                // MFL evaluates both sides of && — guard before verify_password on empty row.
+                if aok == 1 {
+                    if verify_password(password, a.salt, a.pass_hash) == 1 {
+                        r := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce)
+                        sqlite_close(db)
+                        res = r
+                        return
+                    }
+                }
             }
         }
+        if rate_allow(db, "ba:" + client_ip(req), 60, 60) == false {
+            sqlite_close(db)
+            res = basic_auth_rate_limited()
+            return
+        }
         sqlite_close(db)
-        res = response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"invalid credentials\"}")
+        res = basic_auth_unauthorized()
         return
     }
     sqlite_close(db)
@@ -93,7 +122,14 @@ func handle_authorize_login(req) (res) {
     }
     if okr == 0 { sqlite_close(db)  res = html_error("invalid client/redirect")  return }
     a, aok := account_by_handle(db, handle)
-    if aok == 0 || verify_password(password, a.salt, a.pass_hash) == 0 {
+    bad := 0
+    if aok == 0 { bad = 1 } else if verify_password(password, a.salt, a.pass_hash) == 0 { bad = 1 }
+    if bad == 1 {
+        if rate_allow(db, "fl:" + client_ip(req), 60, 60) == false {
+            sqlite_close(db)
+            res = response("429 Too Many Requests", "text/html; charset=utf-8", login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">too many attempts — try again later</p>"))
+            return
+        }
         sqlite_close(db)
         res = ok_html(login_form_err(public_url(req), cid, redirect_uri, scope, state, nonce))
         return
@@ -109,7 +145,11 @@ func handle_authorize_login(req) (res) {
 func handle_authorize_signup(req) (res) {
     db := db_open()
     if db == 0 { res = html_error("db error")  return }
-    if rate_allow(db, "su:" + client_ip(req), 3600, 30) == false { sqlite_close(db)  res = html_error("too many sign-ups — try again later")  return }
+    if rate_allow(db, "su:" + client_ip(req), 3600, 30) == false {
+        sqlite_close(db)
+        res = response("429 Too Many Requests", "text/html; charset=utf-8", "<!doctype html><meta charset=utf-8><body style=\"font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;padding:2rem\"><h2 style=\"color:#f87171\">machin-idp: too many sign-ups — try again later</h2></body>")
+        return
+    }
     handle := form_field(req.body, "handle")
     password := form_field(req.body, "password")
     name := form_field(req.body, "name")
@@ -153,25 +193,42 @@ func handle_token(req) (res) {
     cid := ""
     csec := ""
     auth := header(req, "authorization")
-    if has_prefix(to_lower(auth), "basic ") {
-        dec := base64_decode(trim(substr(auth, 6, len(auth))))
-        ci := index(dec, ":")
+    if has_prefix(to_lower(auth), "basic") {
+        b64 := trim(substr(auth, 5, len(auth)))
+        dec := ""
+        ci := -1
+        if b64 != "" {
+            dec = base64_decode(b64)
+            ci = index(dec, ":")
+        }
         if ci > 0 { cid = substr(dec, 0, ci)  csec = substr(dec, ci + 1, len(dec)) }
     }
     if cid == "" { cid = form_field(req.body, "client_id")  csec = form_field(req.body, "client_secret") }
     c, cok := client_by_id(db, cid)
     if cok == 0 || c.secret_hash != tok_hash(csec) {
+        if rate_allow(db, "tc:" + client_ip(req), 60, 60) == false {
+            sqlite_close(db)
+            res = response("429 Too Many Requests", "application/json", "{\"error\":\"too_many_requests\"}")
+            return
+        }
         sqlite_close(db)
         res = response("401 Unauthorized", "application/json", "{\"error\":\"invalid_client\"}")
         return
     }
+    gt := form_field(req.body, "grant_type")
+    if gt != "authorization_code" {
+        sqlite_close(db)
+        res = bad_request("{\"error\":\"unsupported_grant_type\"}")
+        return
+    }
     code := form_field(req.body, "code")
+    req_redirect := form_field(req.body, "redirect_uri")
     rows := sqlite_query(db, "SELECT client_id, sub, redirect_uri, scope, nonce, expires_at FROM codes WHERE code = ?", []string{code})
     list := parse(rows, []CodeRow{})
     if len(list) == 0 { sqlite_close(db)  res = bad_request("{\"error\":\"invalid_grant\"}")  return }
     cr := list[0]
     sqlite_exec(db, "DELETE FROM codes WHERE code = ?", []string{code})   // one-time
-    if cr.client_id != cid || now() > cr.expires_at {
+    if cr.client_id != cid || now() > cr.expires_at || req_redirect != cr.redirect_uri {
         sqlite_close(db)
         res = bad_request("{\"error\":\"invalid_grant\"}")
         return
@@ -181,7 +238,6 @@ func handle_token(req) (res) {
 
     at := "at_" + newid()
     sqlite_exec(db, "INSERT INTO tokens(access_token, sub, client_id, scope, expires_at) VALUES(?,?,?,?,?)", []string{at, a.sub, cid, cr.scope, str(now() + 3600)})
-    sqlite_close(db)
 
     iss := public_url(req)
     n := now()
@@ -189,6 +245,11 @@ func handle_token(req) (res) {
     if cr.nonce != "" { claims = claims + ",\"nonce\":" + json(cr.nonce) }
     claims = claims + "}"
     idt := jwt_eddsa(claims)
+    sqlite_close(db)
+    if idt == "" {
+        res = response("500 Internal Server Error", "application/json", "{\"error\":\"server_error\"}")
+        return
+    }
     res = ok_json("{\"access_token\":\"" + at + "\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":" + json(cr.scope) + ",\"id_token\":\"" + idt + "\"}")
 }
 

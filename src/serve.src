@@ -56,7 +56,7 @@ func run_server(port) {
     set_access_log(1)
     set_max_body(65536)
     set_read_timeout(15000)
-    if env("IDP_ED25519_SEED") == "" { write(2, "{\"warn\":\"IDP_ED25519_SEED not set — id_tokens signed with a DEV key; set 64 hex chars in prod\"}\n") }
+    check_signing_seed_at_boot()
     write(2, "{\"event\":\"listening\",\"port\":" + str(port) + "}\n")
     serve(port, func(req) { return handle(req) })
 }
