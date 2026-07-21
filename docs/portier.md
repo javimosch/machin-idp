@@ -68,7 +68,7 @@ Users can also self-register during "Login with intrane" via the signup form on
 1. User clicks "Login with intrane" in your app (brokered by portier).
 2. portier redirects to `https://idp.intrane.fr/authorize?…` (standard OIDC code flow).
 3. User signs in on the machin-idp form → redirect back to portier's callback with `code`.
-4. portier exchanges the code at `/token` (client-authenticated) → `access_token` + EdDSA `id_token`.
+4. portier exchanges the code at `/token` (client-authenticated) → `{access_token, token_type: Bearer, expires_in: 3600, scope, id_token}`.
 5. portier validates the `id_token` against `/jwks` and establishes the session.
 
 ### Agent (headless)
@@ -118,7 +118,7 @@ distinguish browser users from headless agents.
 - Access tokens: 1 h TTL; call `/userinfo` with `Authorization: Bearer …`.
 - Redirect URIs: exact match per client (open-redirect guard).
 - Headless Basic failures: rate-limited per IP (60/min); `401` with `WWW-Authenticate: Basic realm="intrane"`, then `429` when exceeded.
-- Form login failures: same rate limit per IP (60/min); `429` with an error form when exceeded.
+- Form login failures: same rate limit per IP (60/min); `429` with an error form when exceeded. Successful form login is not rate-limited.
 - Token endpoint client auth failures: rate-limited per IP (60/min); `401 invalid_client`, then `429 too_many_requests`.
 - **`IDP_ED25519_SEED`**: 64 hex chars, irreplaceable — back up with the DB (see [deploy.md](deploy.md)).
 - **`IDP_KID`**: optional JWT/JWKS key id (default `idp-ed25519-1`); must be alphanumeric plus `.`, `_`, `-` — quotes or JSON metacharacters abort boot.
@@ -126,7 +126,7 @@ distinguish browser users from headless agents.
 ## 7. Local smoke test
 
 ```sh
-./build.sh && ./test.sh   # 83 assertions incl. portier-relevant OIDC checks
+./build.sh && ./test.sh   # 88 assertions incl. portier-relevant OIDC checks
 ```
 
 ## 8. Troubleshooting (portier + machin-idp)

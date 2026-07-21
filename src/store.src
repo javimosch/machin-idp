@@ -133,7 +133,15 @@ func signing_kid() (k) {
 }
 
 // jwt_eddsa builds a compact EdDSA JWT from a claims JSON string.
+// Rejects malformed claims before signing — a broken payload must not leave the IdP.
 func jwt_eddsa(claims_json) (jwt) {
+    jwt = ""
+    _, err := json_get(claims_json, ".iss")
+    if err != "" { return }
+    _, err = json_get(claims_json, ".sub")
+    if err != "" { return }
+    _, err = json_get(claims_json, ".aud")
+    if err != "" { return }
     header := "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"" + signing_kid() + "\"}"
     signing_input := b64url_str(header) + "." + b64url_str(claims_json)
     sig := ed25519_sign(signing_seed(), bytes(signing_input))

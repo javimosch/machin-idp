@@ -234,7 +234,6 @@ func handle_token(req) (res) {
 
     at := "at_" + newid()
     sqlite_exec(db, "INSERT INTO tokens(access_token, sub, client_id, scope, expires_at) VALUES(?,?,?,?,?)", []string{at, a.sub, cid, cr.scope, str(now() + 3600)})
-    sqlite_close(db)
 
     iss := public_url(req)
     n := now()
@@ -242,6 +241,11 @@ func handle_token(req) (res) {
     if cr.nonce != "" { claims = claims + ",\"nonce\":" + json(cr.nonce) }
     claims = claims + "}"
     idt := jwt_eddsa(claims)
+    sqlite_close(db)
+    if idt == "" {
+        res = response("500 Internal Server Error", "application/json", "{\"error\":\"server_error\"}")
+        return
+    }
     res = ok_json("{\"access_token\":\"" + at + "\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":" + json(cr.scope) + ",\"id_token\":\"" + idt + "\"}")
 }
 
