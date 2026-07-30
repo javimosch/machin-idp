@@ -17,6 +17,11 @@ Self-host under **your** brand. There is no public hosted IdP SKU for this proje
 ## Quick start
 
 ```sh
+# Linux x86_64, statically linked — no runtime dependencies, no glibc floor:
+curl -fsSL https://github.com/javimosch/machin-idp/releases/latest/download/machin-idp-linux-x86_64 -o machin-idp
+chmod +x machin-idp
+
+# ...or build it yourself (needs machin):
 ./build.sh    # -> ./machin-idp
 export IDP_PUBLIC_URL=http://127.0.0.1:8798
 export IDP_ED25519_SEED=$(openssl rand -hex 32)
