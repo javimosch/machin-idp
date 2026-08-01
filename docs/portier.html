@@ -63,6 +63,14 @@ curl -s -X POST "$IDP/v1/accounts" \
 
 Users can also self-register via the signup form on `/authorize` if you leave that open.
 
+## 3.1 Scope
+
+Request `openid` in the `scope` parameter to receive an `id_token`. `email` and `profile` are optional and control which claims are returned. A token exchange for a scope without `openid` (for example `email` only) returns an `access_token` but no `id_token`.
+
+## 3.2 `redirect_uri` exact-match
+
+machin-idp rejects any `redirect_uri` that is not an exact match with one of the comma-separated values registered for the client. Protocol, host, port, path, and trailing slashes all matter — keep the callback URL in portier identical to the value registered in `/v1/clients`.
+
 ## 4. Flows
 
 ### Human (via portier)
@@ -94,6 +102,8 @@ curl -s -X POST "$IDP/token" -u 'cid_…:csec_…' \
 | `sub` | Stable account id |
 | `aud` | Client id |
 | alg | `EdDSA` (Ed25519 OKP in JWKS) |
+
+`state` and `nonce` are optional but recommended. `state` is echoed back to the `redirect_uri` unchanged; `nonce` is included in the `id_token` payload when `openid` is requested.
 
 ## Troubleshooting
 
