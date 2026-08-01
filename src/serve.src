@@ -11,7 +11,9 @@ func handle(req) (res) {
     if p == "/.well-known/openid-configuration" { res = handle_discovery(req)  return }
     if p == "/jwks" || p == "/.well-known/jwks.json" { res = handle_jwks(req)  return }
     if req.method == "POST" && p == "/v1/accounts" { res = handle_account_create(req)  return }
+    if req.method == "DELETE" && has_prefix(p, "/v1/accounts/") { res = handle_account_delete(req)  return }
     if req.method == "POST" && p == "/v1/clients" { res = handle_client_create(req)  return }
+    if req.method == "DELETE" && has_prefix(p, "/v1/clients/") { res = handle_client_delete(req)  return }
     if req.method == "POST" && p == "/authorize/login" { res = handle_authorize_login(req)  return }
     if req.method == "POST" && p == "/authorize/signup" { res = handle_authorize_signup(req)  return }
     if p == "/authorize" { res = handle_authorize(req)  return }

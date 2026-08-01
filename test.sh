@@ -11,6 +11,8 @@ PORT=18798
 DB=$(mktemp -d)/test.db
 export IDP_DB="$DB" IDP_PUBLIC_URL="http://127.0.0.1:$PORT"
 export IDP_ED25519_SEED="1111111111111111111111111111111111111111111111111111111111111111"
+# admin token for the PORT2 admin-gated delete tests (PORT is intentionally off)
+ADM="test-admin-token"
 
 ./machin-idp serve -port $PORT 2>/dev/null &
 SRV=$!
@@ -385,11 +387,14 @@ grep -qi 'invalid client/redirect' /tmp/signup_bad_body || fail signupbadmsg; ok
 ./machin-idp account-new -handle ops@x -password opspassword -kind human | grep -q '"ok":true' || fail cli-acct; ok "cli account-new"
 ./machin-idp stats | grep -q '"agents"' || fail cli-stats; ok "cli stats"
 
+# admin-gated delete API is off when IDP_ADMIN_TOKEN is not configured
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B/v1/clients/cid_noexist")" = "403" ] || fail deloff; ok "DELETE disabled when IDP_ADMIN_TOKEN unset"
+
 # --- custom IDP_KID: JWT header kid + JWKS kid must match ---
 PORT2=18799
 DB2=$(mktemp -d)/kid.db
 export IDP_DB="$DB2" IDP_PUBLIC_URL="http://127.0.0.1:$PORT2" IDP_KID="custom-kid-42"
-./machin-idp serve -port $PORT2 2>/dev/null &
+IDP_ADMIN_TOKEN="$ADM" ./machin-idp serve -port $PORT2 2>/dev/null &
 SRV2=$!
 trap 'kill $SRV2 2>/dev/null || true; kill $SRV 2>/dev/null || true' EXIT
 B2="http://127.0.0.1:$PORT2"
@@ -398,7 +403,8 @@ JW2=$(curl -sf "$B2/jwks")
 [ "$(echo "$JW2" | J "['keys'][0]['kid']")" = "custom-kid-42" ] || fail kidjwks; ok "custom IDP_KID in JWKS"
 C2=$(curl -sf -X POST "$B2/v1/clients" -d '{"name":"kidtest","redirect_uris":"http://127.0.0.1:9998/cb"}')
 CID2=$(echo "$C2" | J "['client_id']"); CSEC2=$(echo "$C2" | J "['client_secret']")
-curl -sf -X POST "$B2/v1/accounts" -d '{"handle":"kid@example.com","password":"correct-horse-battery","kind":"agent"}' >/dev/null
+A2=$(curl -sf -X POST "$B2/v1/accounts" -d '{"handle":"kid@example.com","password":"correct-horse-battery","kind":"agent"}')
+SUB2=$(echo "$A2" | J "['sub']")
 AUTHQ2="response_type=code&client_id=$CID2&redirect_uri=http%3A%2F%2F127.0.0.1%3A9998%2Fcb&scope=openid&state=kid&nonce=kidn"
 LOC_K=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'kid@example.com:correct-horse-battery' "$B2/authorize?$AUTHQ2")
 CODE_K=$(echo "$LOC_K" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
@@ -408,6 +414,34 @@ KID_HDR=$(python3 -c "import json,base64,sys; h=sys.argv[1].split('.')[0]; print
 [ "$KID_HDR" = "custom-kid-42" ] || fail kidjwt; ok "custom IDP_KID in id_token header"
 curl -sf "$B2/llms.txt" | grep -qi portier || fail llmsportier; ok "llms.txt mentions portier"
 curl -sf "$B2/guide" | grep -q '"portier"' || fail guideportier; ok "guide_json includes portier"
+
+# --- admin-gated delete/lifecycle API ---
+# no / wrong token -> 403
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B2/v1/clients/cid_noexist")" = "403" ] || fail admdelnocli; ok "DELETE client without token -> 403"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B2/v1/clients/cid_noexist" -H "Authorization: Bearer wrong-token")" = "403" ] || fail admdelwrongcli; ok "DELETE client with wrong token -> 403"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B2/v1/accounts/u_noexist" -H "Authorization: Bearer $ADM")" = "404" ] || fail admdelaccnf; ok "DELETE unknown account by sub -> 404"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B2/v1/accounts?handle=nobody@example.com" -H "Authorization: Bearer $ADM")" = "404" ] || fail admdelhandlenf; ok "DELETE unknown account by handle -> 404"
+
+# issue a fresh code + token, then delete the account; both must be invalidated
+LOC_K2=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'kid@example.com:correct-horse-battery' "$B2/authorize?$AUTHQ2&state=predelete")
+CODE_K2=$(echo "$LOC_K2" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+TOK_K2=$(curl -sf -X POST "$B2/token" -u "$CID2:$CSEC2" -d "grant_type=authorization_code&code=$CODE_K2&redirect_uri=http%3A%2F%2F127.0.0.1%3A9998%2Fcb")
+AT2=$(echo "$TOK_K2" | J "['access_token']")
+[ -n "$AT2" ] || fail admtok2
+DEL_ACC=$(curl -sf -X DELETE "$B2/v1/accounts/$SUB2" -H "Authorization: Bearer $ADM")
+[ "$(echo "$DEL_ACC" | J "['ok']")" = "1" ] || fail admdelacc; ok "DELETE account by sub -> ok"
+[ "$(echo "$DEL_ACC" | J "['removed']")" = "$SUB2" ] || fail admdelaccid; ok "DELETE account returns removed sub"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$B2/userinfo" -H "Authorization: Bearer $AT2")" = "401" ] || fail admtokinv; ok "issued access_token invalidated after account delete"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B2/token" -u "$CID2:$CSEC2" -d "grant_type=authorization_code&code=$CODE_K2&redirect_uri=http%3A%2F%2F127.0.0.1%3A9998%2Fcb")" = "400" ] || fail admcodeinv; ok "unused auth code invalidated after account delete"
+
+# client delete: missing/wrong token, 404, and reject new authorize/token
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B2/v1/clients/$CID2")" = "403" ] || fail admdelnoclic; ok "DELETE client without token -> 403"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B2/v1/clients/$CID2" -H "Authorization: Bearer bad")" = "403" ] || fail admdelwrongc; ok "DELETE client with wrong token -> 403"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B2/v1/clients/cid_nope" -H "Authorization: Bearer $ADM")" = "404" ] || fail admclinotfound; ok "DELETE unknown client -> 404"
+DEL_CLI=$(curl -sf -X DELETE "$B2/v1/clients/$CID2" -H "Authorization: Bearer $ADM")
+[ "$(echo "$DEL_CLI" | J "['ok']")" = "1" ] || fail admdelcli; ok "DELETE client -> ok"
+[ "$(echo "$DEL_CLI" | J "['removed']")" = "$CID2" ] || fail admdelcliid; ok "DELETE client returns removed client_id"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -u 'kid@example.com:correct-horse-battery' "$B2/authorize?response_type=code&client_id=$CID2&redirect_uri=http%3A%2F%2F127.0.0.1%3A9998%2Fcb&scope=openid&state=afterdel")" = "400" ] || fail admafterauth; ok "authorize after client delete -> error"
 
 # invalid IDP_ED25519_SEED aborts serve at boot
 DB_BOOT=$(mktemp -d)/boot.db

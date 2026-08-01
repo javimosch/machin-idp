@@ -63,3 +63,95 @@ func handle_client_create(req) (res) {
     sqlite_close(db)
     res = created("{\"ok\":1,\"client_id\":\"" + cid + "\",\"client_secret\":\"" + secret + "\",\"note\":\"save the secret — shown once. Point your OIDC client (or portier kind=oidc) at " + public_url(req) + "/.well-known/openid-configuration\"}")
 }
+
+// Admin helpers for the delete/lifecycle API.
+// The API is off unless IDP_ADMIN_TOKEN is set; destructive operations are
+// gated on Authorization: Bearer $IDP_ADMIN_TOKEN.
+
+func admin_authorized(req) (ok) {
+    ok = 0
+    tok := env("IDP_ADMIN_TOKEN")
+    if tok == "" { return }
+    auth := header(req, "authorization")
+    if has_prefix(to_lower(auth), "bearer ") {
+        got := trim(substr(auth, 7, len(auth)))
+        if got == tok { ok = 1 }
+    }
+}
+
+func admin_forbidden() (res) {
+    res = response("403 Forbidden", "application/json", "{\"ok\":0,\"error\":\"admin token required\"}")
+}
+
+func not_found_json() (res) {
+    res = response("404 Not Found", "application/json", "{\"ok\":0,\"error\":\"not found\"}")
+}
+
+// DELETE /v1/clients/<client_id>
+func handle_client_delete(req) (res) {
+    if admin_authorized(req) == 0 {
+        res = admin_forbidden()
+        return
+    }
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    pp := split(req.path, "?")
+    p := pp[0]
+    cid := param(p, "/v1/clients/")
+    if cid == "" {
+        sqlite_close(db)
+        res = not_found_json()
+        return
+    }
+    _, found := client_by_id(db, cid)
+    if found == 0 {
+        sqlite_close(db)
+        res = not_found_json()
+        return
+    }
+    sqlite_exec(db, "DELETE FROM clients WHERE client_id = ?", []string{cid})
+    sqlite_close(db)
+    res = ok_json("{\"ok\":1,\"removed\":" + json(cid) + "}")
+}
+
+// DELETE /v1/accounts/<sub> (or ?handle=...)
+func handle_account_delete(req) (res) {
+    if admin_authorized(req) == 0 {
+        res = admin_forbidden()
+        return
+    }
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    pp := split(req.path, "?")
+    p := pp[0]
+    sub := ""
+    handle := query(req, "handle")
+    if handle != "" {
+        hrow, hok := account_by_handle(db, handle)
+        if hok == 0 {
+            sqlite_close(db)
+            res = not_found_json()
+            return
+        }
+        sub = hrow.sub
+    }
+    if sub == "" {
+        sub = param(p, "/v1/accounts/")
+    }
+    if sub == "" {
+        sqlite_close(db)
+        res = not_found_json()
+        return
+    }
+    arow, aok := account_by_sub(db, sub)
+    if aok == 0 {
+        sqlite_close(db)
+        res = not_found_json()
+        return
+    }
+    sqlite_exec(db, "DELETE FROM codes WHERE sub = ?", []string{arow.sub})
+    sqlite_exec(db, "DELETE FROM tokens WHERE sub = ?", []string{arow.sub})
+    sqlite_exec(db, "DELETE FROM accounts WHERE sub = ?", []string{arow.sub})
+    sqlite_close(db)
+    res = ok_json("{\"ok\":1,\"removed\":" + json(arow.sub) + "}")
+}
