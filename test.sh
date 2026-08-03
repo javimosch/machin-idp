@@ -11,6 +11,7 @@ PORT=18798
 DB=$(mktemp -d)/test.db
 export IDP_DB="$DB" IDP_PUBLIC_URL="http://127.0.0.1:$PORT"
 export IDP_ED25519_SEED="1111111111111111111111111111111111111111111111111111111111111111"
+export IDP_ADMIN_TOKEN="test-admin-token-12345"
 
 ./machin-idp serve -port $PORT 2>/dev/null &
 SRV=$!
@@ -446,5 +447,56 @@ for i in $(seq 1 30); do curl -s -o /dev/null -X POST "$B/authorize/signup" \
   --data-urlencode "name=SU31" --data-urlencode "client_id=$CID" \
   --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" \
   --data-urlencode "state=surl31")" = "429" ] || fail signuprl; ok "31st authorize/signup from same IP -> 429"
+
+# --- admin delete endpoints (IDP_ADMIN_TOKEN) ---
+ADM="$IDP_ADMIN_TOKEN"
+
+# delete client: create a throwaway client via CLI and remove it via HTTP
+C_DEL=$(./machin-idp client-new -name delme -redirect 'http://127.0.0.1:7777/cb')
+CID_DEL=$(echo "$C_DEL" | J "['data']['client_id']")
+[ -n "$CID_DEL" ] || fail delclient; ok "client created for deletion"
+DELC=$(curl -sf -X DELETE "$B/v1/clients/$CID_DEL" -H "Authorization: Bearer $ADM")
+[ "$(echo "$DELC" | J "['ok']")" = "1" ] || fail delclientok; ok "admin deletes client"
+[ "$(echo "$DELC" | J "['removed']")" = "$CID_DEL" ] || fail delclientid; ok "delete client returns removed id"
+# client removed: /authorize now reports unknown client_id
+curl -s "$B/authorize?response_type=code&client_id=$CID_DEL&redirect_uri=http%3A%2F%2F127.0.0.1%3A7777%2Fcb&scope=openid" | grep -qi "unknown client" || fail delclientauthz; ok "deleted client rejected at /authorize"
+# missing or wrong admin token -> 403
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B/v1/clients/$CID_DEL" -H "Authorization: Bearer wrong-token")" = "403" ] || fail delclientbad; ok "delete client with bad token -> 403"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B/v1/clients/cid_nope" -H "Authorization: Bearer $ADM")" = "404" ] || fail delclientnf; ok "delete unknown client -> 404"
+
+# delete account: create a throwaway account via CLI, issue an auth code and token, then delete
+A_DEL=$(./machin-idp account-new -handle delacct@example.com -password correct-horse-battery -kind agent)
+SUB_DEL=$(echo "$A_DEL" | J "['data']['sub']")
+[ -n "$SUB_DEL" ] || fail delacctsub; ok "account created for deletion"
+AUTHQ_DEL="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid&state=del&nonce=deln"
+LOC_DEL=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'delacct@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_DEL")
+CODE_DEL=$(echo "$LOC_DEL" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_DEL" ] || fail delacctcode; ok "auth code issued for deletable account"
+TOK_DEL=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_DEL&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+AT_DEL=$(echo "$TOK_DEL" | J "['access_token']")
+[ -n "$AT_DEL" ] || fail delaccttok; ok "access token issued for deletable account"
+
+DELA=$(curl -sf -X DELETE "$B/v1/accounts/$SUB_DEL" -H "Authorization: Bearer $ADM")
+[ "$(echo "$DELA" | J "['ok']")" = "1" ] || fail delacctaok; ok "admin deletes account by sub"
+[ "$(echo "$DELA" | J "['removed']")" = "$SUB_DEL" ] || fail delaccts; ok "delete account returns removed sub"
+
+# issued auth code and token are now invalid
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_DEL&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "400" ] || fail delacctcodeinv; ok "deleted account code -> invalid_grant"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$B/userinfo" -H "Authorization: Bearer $AT_DEL")" = "401" ] || fail delaccttokinv; ok "deleted account access_token -> 401"
+
+# delete by handle query
+A_BYH=$(./machin-idp account-new -handle byhandle@example.com -password correct-horse-battery -kind agent)
+SUB_BY_HANDLE=$(echo "$A_BYH" | J "['data']['sub']")
+[ -n "$SUB_BY_HANDLE" ] || fail byhandlesub; ok "account for handle deletion"
+DELH=$(curl -sf -X DELETE "$B/v1/accounts/none?handle=byhandle@example.com" -H "Authorization: Bearer $ADM")
+[ "$(echo "$DELH" | J "['removed']")" = "$SUB_BY_HANDLE" ] || fail byhandleok; ok "delete account by handle query"
+
+# missing / unknown account -> 404
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B/v1/accounts/u_nosuchsub" -H "Authorization: Bearer $ADM")" = "404" ] || fail delacctf; ok "delete unknown account by sub -> 404"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B/v1/accounts/any?handle=nosuch@example.com" -H "Authorization: Bearer $ADM")" = "404" ] || fail delhandlef; ok "delete account by missing handle -> 404"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B/v1/accounts/u_nosuchsub" -H "Authorization: Bearer wrong-token")" = "403" ] || fail delacctbad; ok "delete account with bad token -> 403"
+
+# delete endpoints reject empty Bearer tokens
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B/v1/clients/$CID_DEL" -H 'Authorization: Bearer ')" = "403" ] || fail delnoadmin; ok "delete endpoint off without admin token"
 
 echo "ALL $P TESTS PASSED"
