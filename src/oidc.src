@@ -13,6 +13,32 @@ func handle_discovery(req) (res) {
 
 func handle_jwks(req) (res) { res = ok_json(jwks_json()) }
 
+// ---- small helpers for auth form / token hardening ----
+
+// html_escape prevents reflected XSS in error pages and form values.
+func html_escape(s) (out) {
+    out = replace(s, "&", "&amp;")
+    out = replace(out, "<", "&lt;")
+    out = replace(out, ">", "&gt;")
+    out = replace(out, "\"", "&quot;")
+    out = replace(out, "'", "&#39;")
+}
+
+// scope_has returns 1 when a space-separated OIDC scope list contains needle.
+func scope_has(scope, needle) (ok) {
+    ok = 0
+    for _, part := range split(scope, " ") {
+        if trim(part) == needle { ok = 1  return }
+    }
+}
+
+// redirect_uri_safe rejects values that could split HTTP headers (CR/LF injection).
+func redirect_uri_safe(uri) (ok) {
+    ok = 1
+    if index(uri, "\r") >= 0 { ok = 0 }
+    if index(uri, "\n") >= 0 { ok = 0 }
+}
+
 // validate the authorize request; returns the client + resolved params or an error string.
 func authorize_params(db, req) (cid, redirect_uri, scope, state, nonce, err) {
     err = ""
@@ -21,6 +47,7 @@ func authorize_params(db, req) (cid, redirect_uri, scope, state, nonce, err) {
     scope = query(req, "scope")
     state = query(req, "state")
     nonce = query(req, "nonce")
+    if redirect_uri_safe(redirect_uri) == 0 { err = "redirect_uri contains invalid characters"  return }
     rt := query(req, "response_type")
     if rt != "code" { err = "response_type must be code"  return }
     c, ok := client_by_id(db, cid)
@@ -41,18 +68,19 @@ func issue_code_redirect(db, cid, sub, redirect_uri, scope, state, nonce) (res) 
     dest := redirect_uri + sep + "code=" + url_encode(code)
     if state != "" { dest = dest + "&state=" + url_encode(state) }
     res = redirect(dest)
+    res = with_header(res, "Cache-Control", "no-store")
 }
 
 // 401 for failed/malformed headless Basic auth — RFC 7617 realm + no info leak.
 func basic_auth_unauthorized() (res) {
-    res = response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"invalid credentials\"}")
-    res = with_header(res, "WWW-Authenticate", "Basic realm=\"intrane\"")
+    res = with_header(response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"invalid credentials\"}"), "WWW-Authenticate", "Basic realm=\"intrane\"")
+    res = with_header(res, "Cache-Control", "no-store")
 }
 
 // 429 when headless Basic auth failures are rate-limited (same body shape, no leak).
 func basic_auth_rate_limited() (res) {
-    res = response("429 Too Many Requests", "application/json", "{\"ok\":0,\"error\":\"too many attempts\"}")
-    res = with_header(res, "WWW-Authenticate", "Basic realm=\"intrane\"")
+    res = with_header(response("429 Too Many Requests", "application/json", "{\"ok\":0,\"error\":\"too many attempts\"}"), "WWW-Authenticate", "Basic realm=\"intrane\"")
+    res = with_header(res, "Cache-Control", "no-store")
 }
 
 // GET /authorize — headless (Authorization: Basic handle:password) for agents, else a form.
@@ -101,7 +129,7 @@ func handle_authorize(req) (res) {
     }
     sqlite_close(db)
     // human path: a minimal login form that re-submits the oidc params
-    res = ok_html(login_form(public_url(req), cid, redirect_uri, scope, state, nonce))
+    res = with_header(ok_html(login_form(public_url(req), cid, redirect_uri, scope, state, nonce)), "Cache-Control", "no-store")
 }
 
 // POST /authorize/login — the form submit (form-encoded handle/password + oidc params).
@@ -115,6 +143,7 @@ func handle_authorize_login(req) (res) {
     scope := form_field(req.body, "scope")
     state := form_field(req.body, "state")
     nonce := form_field(req.body, "nonce")
+    if redirect_uri_safe(redirect_uri) == 0 { sqlite_close(db)  res = html_error("invalid client/redirect")  return }
     c, cok := client_by_id(db, cid)
     okr := 0
     if cok == 1 {
@@ -127,11 +156,11 @@ func handle_authorize_login(req) (res) {
     if bad == 1 {
         if rate_allow(db, "fl:" + client_ip(req), 60, 60) == false {
             sqlite_close(db)
-            res = response("429 Too Many Requests", "text/html; charset=utf-8", login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">too many attempts — try again later</p>"))
+            res = with_header(response("429 Too Many Requests", "text/html; charset=utf-8", login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">too many attempts — try again later</p>")), "Cache-Control", "no-store")
             return
         }
         sqlite_close(db)
-        res = ok_html(login_form_err(public_url(req), cid, redirect_uri, scope, state, nonce))
+        res = with_header(ok_html(login_form_err(public_url(req), cid, redirect_uri, scope, state, nonce)), "Cache-Control", "no-store")
         return
     }
     rr := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce)
@@ -145,16 +174,17 @@ func handle_authorize_login(req) (res) {
 func handle_authorize_signup(req) (res) {
     db := db_open()
     if db == 0 { res = html_error("db error")  return }
+    redirect_uri := form_field(req.body, "redirect_uri")
+    if redirect_uri_safe(redirect_uri) == 0 { sqlite_close(db)  res = html_error("invalid client/redirect")  return }
     if rate_allow(db, "su:" + client_ip(req), 3600, 30) == false {
         sqlite_close(db)
-        res = response("429 Too Many Requests", "text/html; charset=utf-8", "<!doctype html><meta charset=utf-8><body style=\"font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;padding:2rem\"><h2 style=\"color:#f87171\">machin-idp: too many sign-ups — try again later</h2></body>")
+        res = with_header(response("429 Too Many Requests", "text/html; charset=utf-8", "<!doctype html><meta charset=utf-8><body style=\"font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;padding:2rem\"><h2 style=\"color:#f87171\">machin-idp: too many sign-ups — try again later</h2></body>"), "Cache-Control", "no-store")
         return
     }
     handle := form_field(req.body, "handle")
     password := form_field(req.body, "password")
     name := form_field(req.body, "name")
     cid := form_field(req.body, "client_id")
-    redirect_uri := form_field(req.body, "redirect_uri")
     scope := form_field(req.body, "scope")
     state := form_field(req.body, "state")
     nonce := form_field(req.body, "nonce")
@@ -166,13 +196,13 @@ func handle_authorize_signup(req) (res) {
     if okr == 0 { sqlite_close(db)  res = html_error("invalid client/redirect")  return }
     if handle == "" || len(password) < 8 {
         sqlite_close(db)
-        res = ok_html(login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">handle and password (min 8 chars) required</p>"))
+        res = with_header(ok_html(login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">handle and password (min 8 chars) required</p>")), "Cache-Control", "no-store")
         return
     }
     _, exists := account_by_handle(db, handle)
     if exists == 1 {
         sqlite_close(db)
-        res = ok_html(login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">that handle is taken — sign in instead</p>"))
+        res = with_header(ok_html(login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">that handle is taken — sign in instead</p>")), "Cache-Control", "no-store")
         return
     }
     sub := "u_" + newid()
@@ -239,18 +269,29 @@ func handle_token(req) (res) {
     at := "at_" + newid()
     sqlite_exec(db, "INSERT INTO tokens(access_token, sub, client_id, scope, expires_at) VALUES(?,?,?,?,?)", []string{at, a.sub, cid, cr.scope, str(now() + 3600)})
 
-    iss := public_url(req)
-    n := now()
-    claims := "{\"iss\":" + json(iss) + ",\"sub\":\"" + a.sub + "\",\"aud\":\"" + cid + "\",\"iat\":" + str(n) + ",\"exp\":" + str(n + 3600) + ",\"email\":" + json(a.handle) + ",\"name\":" + json(a.name)
-    if cr.nonce != "" { claims = claims + ",\"nonce\":" + json(cr.nonce) }
-    claims = claims + "}"
-    idt := jwt_eddsa(claims)
-    sqlite_close(db)
-    if idt == "" {
-        res = response("500 Internal Server Error", "application/json", "{\"error\":\"server_error\"}")
-        return
+    idt := ""
+    if scope_has(cr.scope, "openid") == 1 {
+        iss := public_url(req)
+        n := now()
+        claims := "{\"iss\":" + json(iss) + ",\"sub\":\"" + a.sub + "\",\"aud\":\"" + cid + "\",\"iat\":" + str(n) + ",\"exp\":" + str(n + 3600)
+        if scope_has(cr.scope, "email") == 1 { claims = claims + ",\"email\":" + json(a.handle) }
+        if scope_has(cr.scope, "profile") == 1 { claims = claims + ",\"name\":" + json(a.name) }
+        if cr.nonce != "" { claims = claims + ",\"nonce\":" + json(cr.nonce) }
+        claims = claims + "}"
+        idt = jwt_eddsa(claims)
+        sqlite_close(db)
+        if idt == "" {
+            res = response("500 Internal Server Error", "application/json", "{\"error\":\"server_error\"}")
+            return
+        }
+    } else {
+        sqlite_close(db)
     }
-    res = ok_json("{\"access_token\":\"" + at + "\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":" + json(cr.scope) + ",\"id_token\":\"" + idt + "\"}")
+
+    body := "{\"access_token\":\"" + at + "\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":" + json(cr.scope)
+    if idt != "" { body = body + ",\"id_token\":\"" + idt + "\"" }
+    body = body + "}"
+    res = with_header(ok_json(body), "Cache-Control", "no-store")
 }
 
 // GET /userinfo — Bearer access_token -> claims.
@@ -273,7 +314,7 @@ func handle_userinfo(req) (res) {
 // ---- small helpers ----
 
 func html_error(msg) (res) {
-    res = response("400 Bad Request", "text/html; charset=utf-8", "<!doctype html><meta charset=utf-8><body style=\"font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;padding:2rem\"><h2 style=\"color:#f87171\">machin-idp: " + msg + "</h2></body>")
+    res = with_header(response("400 Bad Request", "text/html; charset=utf-8", "<!doctype html><meta charset=utf-8><body style=\"font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;padding:2rem\"><h2 style=\"color:#f87171\">machin-idp: " + html_escape(msg) + "</h2></body>"), "Cache-Control", "no-store")
 }
 
 // form_field extracts a value from an application/x-www-form-urlencoded body.
@@ -294,6 +335,6 @@ func login_form_err(base, cid, redirect_uri, scope, state, nonce) (h) {
     h = login_form_msg(base, cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">invalid credentials</p>")
 }
 func login_form_msg(base, cid, redirect_uri, scope, state, nonce, msg) (h) {
-    hid := "<input type=hidden name=client_id value=\"" + cid + "\"><input type=hidden name=redirect_uri value=\"" + redirect_uri + "\"><input type=hidden name=scope value=\"" + scope + "\"><input type=hidden name=state value=\"" + state + "\"><input type=hidden name=nonce value=\"" + nonce + "\">"
-    h = "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Sign in — intrane</title><style>body{font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;display:grid;place-items:center;min-height:100vh;margin:0}form{max-width:320px;width:90%}input[type=text],input[type=password]{width:100%;box-sizing:border-box;background:#101014;border:1px solid #1f1f26;border-radius:8px;color:#e2e8f0;padding:10px;margin:6px 0;font-family:inherit}button{width:100%;background:#38bdf8;color:#000;border:0;border-radius:8px;padding:10px;font-weight:600;cursor:pointer;margin-top:8px}h1{font-size:1.2rem}small{color:#8b93a3}</style></head><body><form method=post action=\"" + base + "/authorize/login\"><h1>Sign in with intrane</h1>" + msg + "<input type=text name=handle placeholder=\"handle / email\" autofocus><input type=password name=password placeholder=\"password\">" + hid + "<button>Continue</button></form><hr style=\"border-color:#1f1f26;margin:18px 0\"><form method=post action=\"" + base + "/authorize/signup\"><h1 style=\"font-size:1rem\">New here? Create an account</h1><input type=text name=handle placeholder=\"email\"><input type=password name=password placeholder=\"password (min 8 chars)\"><input type=text name=name placeholder=\"name (optional)\">" + hid + "<button>Create account &amp; continue</button></form><p><small>Agents: send Authorization: Basic on /authorize to skip this form.</small></p></body></html>"
+    hid := "<input type=hidden name=client_id value=\"" + html_escape(cid) + "\"><input type=hidden name=redirect_uri value=\"" + html_escape(redirect_uri) + "\"><input type=hidden name=scope value=\"" + html_escape(scope) + "\"><input type=hidden name=state value=\"" + html_escape(state) + "\"><input type=hidden name=nonce value=\"" + html_escape(nonce) + "\">"
+    h = "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Sign in — intrane</title><style>body{font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;display:grid;place-items:center;min-height:100vh;margin:0}form{max-width:320px;width:90%}input[type=text],input[type=password]{width:100%;box-sizing:border-box;background:#101014;border:1px solid #1f1f26;border-radius:8px;color:#e2e8f0;padding:10px;margin:6px 0;font-family:inherit}button{width:100%;background:#38bdf8;color:#000;border:0;border-radius:8px;padding:10px;font-weight:600;cursor:pointer;margin-top:8px}h1{font-size:1.2rem}small{color:#8b93a3}</style></head><body><form method=post action=\"" + html_escape(base) + "/authorize/login\"><h1>Sign in with intrane</h1>" + msg + "<input type=text name=handle placeholder=\"handle / email\" autofocus><input type=password name=password placeholder=\"password\">" + hid + "<button>Continue</button></form><hr style=\"border-color:#1f1f26;margin:18px 0\"><form method=post action=\"" + html_escape(base) + "/authorize/signup\"><h1 style=\"font-size:1rem\">New here? Create an account</h1><input type=text name=handle placeholder=\"email\"><input type=password name=password placeholder=\"password (min 8 chars)\"><input type=text name=name placeholder=\"name (optional)\">" + hid + "<button>Create account &amp; continue</button></form><p><small>Agents: send Authorization: Basic on /authorize to skip this form.</small></p></body></html>"
 }
