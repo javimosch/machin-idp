@@ -45,7 +45,7 @@ CID=$(echo "$C" | J "['client_id']"); CSEC=$(echo "$C" | J "['client_secret']")
 [ -n "$CSEC" ] || fail client; ok "client registered ($CID)"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/v1/clients" -d '{"name":"noredir"}')" = "400" ] || fail clinoredir; ok "client missing redirect_uris -> 400"
 
-AUTHQ="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid%20email&state=xyz&nonce=n1"
+AUTHQ="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid%20email%20profile&state=xyz&nonce=n1"
 
 # --- headless agent login: HTTP Basic on /authorize -> 302 with code ---
 LOC=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ")
@@ -96,7 +96,7 @@ IDT=$(echo "$TOK" | J "['id_token']")
 [ -n "$IDT" ] || fail idt; ok "id_token issued"
 [ "$(echo "$TOK" | J "['token_type']")" = "Bearer" ] || fail toktype; ok "token response token_type Bearer"
 [ "$(echo "$TOK" | J "['expires_in']")" = "3600" ] || fail tokexp; ok "token response expires_in 3600"
-[ "$(echo "$TOK" | J "['scope']")" = "openid email" ] || fail scope; ok "token response echoes authorize scope"
+[ "$(echo "$TOK" | J "['scope']")" = "openid email profile" ] || fail scope; ok "token response echoes authorize scope"
 # token exchange without client credentials -> 401 invalid_client
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -d "grant_type=authorization_code&code=$CODE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "401" ] || fail noclient; ok "token exchange without client auth -> 401"
 # code is one-time
@@ -409,6 +409,9 @@ KID_HDR=$(python3 -c "import json,base64,sys; h=sys.argv[1].split('.')[0]; print
 curl -sf "$B2/llms.txt" | grep -qi portier || fail llmsportier; ok "llms.txt mentions portier"
 curl -sf "$B2/guide" | grep -q '"portier"' || fail guideportier; ok "guide_json includes portier"
 
+# CR/LF in redirect_uri is rejected before any signup rate limit is checked
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B2/authorize/signup" --data-urlencode "handle=crlfsu@example.com" --data-urlencode "password=correct-horse-battery" --data-urlencode "client_id=$CID2" --data-urlencode "redirect_uri=http://127.0.0.1:9998/cb"$'\r\n'"Location: http://evil.com" --data-urlencode "scope=openid email" --data-urlencode "state=crlfsignup")" = "400" ] || fail crlf_signup; ok "CR/LF in redirect_uri blocked on /authorize/signup"
+
 # invalid IDP_ED25519_SEED aborts serve at boot
 DB_BOOT=$(mktemp -d)/boot.db
 set +e
@@ -446,5 +449,72 @@ for i in $(seq 1 30); do curl -s -o /dev/null -X POST "$B/authorize/signup" \
   --data-urlencode "name=SU31" --data-urlencode "client_id=$CID" \
   --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" \
   --data-urlencode "state=surl31")" = "429" ] || fail signuprl; ok "31st authorize/signup from same IP -> 429"
+
+# --- scope gating: id_token requires openid scope ---
+AUTHQ_NO_OPENID="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=email&state=noopenid&nonce=noopenidn"
+LOC_NO_OPENID=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_NO_OPENID")
+CODE_NO_OPENID=$(echo "$LOC_NO_OPENID" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_NO_OPENID" ] || fail noopenid_code
+TOK_NO_OPENID=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_NO_OPENID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+[ -n "$(echo "$TOK_NO_OPENID" | J "['access_token']")" ] || fail noopenid_at; ok "non-openid scope still returns access_token"
+python3 - "$TOK_NO_OPENID" <<'PY' || fail noopenid_idt
+import sys, json
+d=json.loads(sys.argv[1])
+assert 'id_token' not in d, d
+PY
+ok "non-openid scope does not issue id_token"
+[ "$(echo "$TOK_NO_OPENID" | J "['scope']")" = "email" ] || fail noopenid_scope; ok "token response echoes non-openid scope"
+
+# --- Cache-Control: no-store on auth responses ---
+curl -s -D /tmp/idp_cc_headless -o /dev/null -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=ccheadless"
+grep -qi 'Cache-Control: no-store' /tmp/idp_cc_headless || fail cc_headless; ok "headless /authorize redirect has Cache-Control: no-store"
+curl -s -D /tmp/idp_cc_form -o /dev/null "$B/authorize?$AUTHQ&state=ccform"
+grep -qi 'Cache-Control: no-store' /tmp/idp_cc_form || fail cc_form; ok "form /authorize has Cache-Control: no-store"
+AUTHQ_CC="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid%20email&state=cctoken&nonce=cctn"
+LOC_CC=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_CC")
+CODE_CC=$(echo "$LOC_CC" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_CC" ] || fail cc_code
+curl -s -D /tmp/idp_cc_token -o /dev/null -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_CC&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb"
+grep -qi 'Cache-Control: no-store' /tmp/idp_cc_token || fail cc_token; ok "/token response has Cache-Control: no-store"
+curl -s -D /tmp/idp_cc_err -o /dev/null "$B/authorize?response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb%0D%0ALocation%3A%20http%3A%2F%2Fevil.com&scope=openid&state=ccerr"
+grep -qi 'Cache-Control: no-store' /tmp/idp_cc_err || fail cc_err; ok "authorize error page has Cache-Control: no-store"
+
+# --- redirect_uri CR/LF header injection blocked ---
+[ "$(curl -s -o /dev/null -w '%{http_code}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb%0D%0ALocation%3A%20http%3A%2F%2Fevil.com&scope=openid&state=crlf")" = "400" ] || fail crlf_get; ok "CR/LF in redirect_uri blocked on /authorize GET"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=correct-horse-battery" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb"$'\r\n'"Location: http://evil.com" --data-urlencode "scope=openid email" --data-urlencode "state=crlflogin")" = "400" ] || fail crlf_login; ok "CR/LF in redirect_uri blocked on /authorize/login"
+
+# --- reflected XSS protection in login form ---
+XSS_STATE="%22%3E%3Cscript%3Ealert%281%29%3C%2Fscript%3E"
+XSS_HTML=$(curl -sf "$B/authorize?response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid%20email&state=$XSS_STATE")
+! echo "$XSS_HTML" | grep -q '<script>alert(1)</script>' || fail xss_tag; ok "form does not emit raw script tag"
+echo "$XSS_HTML" | grep -q '&lt;script&gt;alert(1)&lt;/script&gt;' || fail xss_escaped; ok "form escapes state as HTML entities"
+
+# --- scope gating: id_token claims depend on scope ---
+AUTHQ_OPENIDONLY="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid&state=openidonly&nonce=oon"
+LOC_OO=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_OPENIDONLY")
+CODE_OO=$(echo "$LOC_OO" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_OO" ] || fail ooidcode
+TOK_OO=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_OO&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+[ -n "$(echo "$TOK_OO" | J "['id_token']")" ] || fail ooidt; ok "openid-only scope issues id_token"
+python3 - "$TOK_OO" <<'PY' || fail ooclaims
+import sys, json, base64
+def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+pay = json.loads(b64u(sys.argv[1].split('.')[1]))
+assert 'email' not in pay, pay
+assert 'name' not in pay, pay
+PY
+ok "openid-only id_token omits email and name claims"
+
+# --- userinfo responses are not cacheable ---
+LOC_UI=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_CC&state=ccui2")
+CODE_UI=$(echo "$LOC_UI" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_UI" ] || fail ccuicode
+TOK_UI=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_UI&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+AT_UI=$(echo "$TOK_UI" | J "['access_token']")
+[ -n "$AT_UI" ] || fail ccuiat
+curl -s -D /tmp/idp_cc_ui -o /dev/null -H "Authorization: Bearer $AT_UI" "$B/userinfo"
+grep -qi 'Cache-Control: no-store' /tmp/idp_cc_ui || fail cc_userinfo; ok "/userinfo 200 has Cache-Control: no-store"
+curl -s -D /tmp/idp_cc_uie -o /dev/null -H "Authorization: Bearer at_nope" "$B/userinfo"
+grep -qi 'Cache-Control: no-store' /tmp/idp_cc_uie || fail cc_userinfoe; ok "/userinfo 401 has Cache-Control: no-store"
 
 echo "ALL $P TESTS PASSED"
