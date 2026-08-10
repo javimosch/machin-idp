@@ -489,4 +489,32 @@ XSS_HTML=$(curl -sf "$B/authorize?response_type=code&client_id=$CID&redirect_uri
 ! echo "$XSS_HTML" | grep -q '<script>alert(1)</script>' || fail xss_tag; ok "form does not emit raw script tag"
 echo "$XSS_HTML" | grep -q '&lt;script&gt;alert(1)&lt;/script&gt;' || fail xss_escaped; ok "form escapes state as HTML entities"
 
+# --- scope gating: openid-only id_token omits email and name ---
+AUTHQ_OPENIDONLY="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid&state=openidonly&nonce=oon"
+LOC_OO=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_OPENIDONLY")
+CODE_OO=$(echo "$LOC_OO" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_OO" ] || fail ooidcode
+TOK_OO=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_OO&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+[ -n "$(echo "$TOK_OO" | J "['id_token']")" ] || fail ooidt; ok "openid-only scope issues id_token"
+python3 - "$TOK_OO" <<'PY' || fail ooclaims
+import sys, json, base64
+def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+pay = json.loads(b64u(sys.argv[1].split('.')[1]))
+assert 'email' not in pay, pay
+assert 'name' not in pay, pay
+PY
+ok "openid-only id_token omits email and name claims"
+
+# --- /userinfo must not be cached ---
+LOC_UI=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=ccui2")
+CODE_UI=$(echo "$LOC_UI" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_UI" ] || fail ccuicode
+TOK_UI=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_UI&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+AT_UI=$(echo "$TOK_UI" | J "['access_token']")
+[ -n "$AT_UI" ] || fail ccuiat
+curl -s -D /tmp/idp_cc_ui -o /dev/null -H "Authorization: Bearer $AT_UI" "$B/userinfo"
+grep -qi 'Cache-Control: no-store' /tmp/idp_cc_ui || fail cc_userinfo; ok "/userinfo 200 has Cache-Control: no-store"
+curl -s -D /tmp/idp_cc_uie -o /dev/null -H "Authorization: Bearer at_nope" "$B/userinfo"
+grep -qi 'Cache-Control: no-store' /tmp/idp_cc_uie || fail cc_userinfoe; ok "/userinfo 401 has Cache-Control: no-store"
+
 echo "ALL $P TESTS PASSED"
