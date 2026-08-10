@@ -299,16 +299,16 @@ func handle_userinfo(req) (res) {
     at := header(req, "authorization")
     if has_prefix(to_lower(at), "bearer ") { at = trim(substr(at, 7, len(at))) } else { at = "" }
     db := db_open()
-    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"error\":\"server_error\"}")  return }
+    if db == 0 { res = with_header(response("500 Internal Server Error", "application/json", "{\"error\":\"server_error\"}"), "Cache-Control", "no-store")  return }
     rows := sqlite_query(db, "SELECT sub, client_id, scope, expires_at FROM tokens WHERE access_token = ?", []string{at})
     list := parse(rows, []TokenRow{})
-    if len(list) == 0 { sqlite_close(db)  res = response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}")  return }
+    if len(list) == 0 { sqlite_close(db)  res = with_header(response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}"), "Cache-Control", "no-store")  return }
     tr := list[0]
-    if now() > tr.expires_at { sqlite_close(db)  res = response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}")  return }
+    if now() > tr.expires_at { sqlite_close(db)  res = with_header(response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}"), "Cache-Control", "no-store")  return }
     a, aok := account_by_sub(db, tr.sub)
     sqlite_close(db)
-    if aok == 0 { res = response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}")  return }
-    res = ok_json("{\"sub\":\"" + a.sub + "\",\"email\":" + json(a.handle) + ",\"name\":" + json(a.name) + ",\"kind\":\"" + a.kind + "\"}")
+    if aok == 0 { res = with_header(response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}"), "Cache-Control", "no-store")  return }
+    res = with_header(ok_json("{\"sub\":\"" + a.sub + "\",\"email\":" + json(a.handle) + ",\"name\":" + json(a.name) + ",\"kind\":\"" + a.kind + "\"}"), "Cache-Control", "no-store")
 }
 
 // ---- small helpers ----
