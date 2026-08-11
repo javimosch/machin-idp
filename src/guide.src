@@ -32,8 +32,8 @@ func llms_txt(base) (t) {
         "POST /v1/clients  {name, redirect_uris}              register an OIDC client\n" +
         "GET  /authorize   (Basic auth = headless agent login, else a form)\n" +
         "POST /token       code -> {access_token, optional EdDSA id_token}\n" +
-        "GET  /userinfo    Bearer access_token -> claims\n\n" +
-        "Signing: EdDSA (Ed25519) — modern, small keys, pure MFL. id_tokens carry\n" +
+        "GET  /userinfo    Bearer access_token -> scope-gated claims (sub always; email with 'email'; name/kind with 'profile')\n\n" +
+        "Signing: EdDSA (Ed25519) — modern, small keys, pure MFL. id_tokens and /userinfo carry\n" +
         "{iss, sub, aud, iat, exp} plus scope-dependent email (email) and name (profile).\n\n" +
         "## Broker integration (e.g. portier)\n\n" +
         "Register machin-idp as a generic OIDC provider in your broker.\n" +

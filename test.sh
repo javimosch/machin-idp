@@ -308,6 +308,69 @@ UI_BEAR=$(curl -sf "$B/userinfo" -H "Authorization: bearer $AT")
 sqlite3 "$DB" "UPDATE tokens SET expires_at=1 WHERE access_token='$AT'"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$B/userinfo" -H "Authorization: Bearer $AT")" = "401" ] || fail atexp; ok "expired access_token -> 401"
 
+# --- userinfo scope gating + WWW-Authenticate ---
+UI_NOAUTH=$(curl -s -D /tmp/idp_uiauth -o /dev/null "$B/userinfo")
+grep -qi 'WWW-Authenticate: Bearer' /tmp/idp_uiauth || fail uiwww; ok "userinfo missing Authorization -> 401 with WWW-Authenticate Bearer"
+UI_BADTOK=$(curl -s -D /tmp/idp_uibad -o /dev/null -H "Authorization: Bearer at_nope" "$B/userinfo")
+grep -qi 'WWW-Authenticate: Bearer' /tmp/idp_uibad || fail uiwwwbad; ok "userinfo bad token -> 401 with WWW-Authenticate Bearer"
+
+# openid-only scope -> userinfo returns only sub
+AUTHQ_UI_OPENID="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid&state=uiopenid&nonce=uiopenidn"
+LOC_UI_OPENID=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_UI_OPENID")
+CODE_UI_OPENID=$(echo "$LOC_UI_OPENID" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_UI_OPENID" ] || fail uiopenidcode
+TOK_UI_OPENID=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_UI_OPENID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+AT_UI_OPENID=$(echo "$TOK_UI_OPENID" | J "['access_token']")
+[ -n "$AT_UI_OPENID" ] || fail uiopenidat
+UI_OPENID=$(curl -sf "$B/userinfo" -H "Authorization: Bearer $AT_UI_OPENID")
+[ "$(echo "$UI_OPENID" | J "['sub']")" = "$SUB" ] || fail uiopenid_sub; ok "userinfo openid-only returns sub"
+python3 - "$UI_OPENID" <<'PY' || fail uiopenid_leak
+import json,sys
+d=json.loads(sys.argv[1])
+assert 'email' not in d, d
+assert 'name' not in d, d
+assert 'kind' not in d, d
+PY
+ok "userinfo openid-only omits email, name and kind"
+
+# openid+email scope -> userinfo returns sub+email, no name/kind
+AUTHQ_UI_EMAIL="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid%20email&state=uiemail&nonce=uiemailn"
+LOC_UI_EMAIL=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_UI_EMAIL")
+CODE_UI_EMAIL=$(echo "$LOC_UI_EMAIL" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_UI_EMAIL" ] || fail uiemailcode
+TOK_UI_EMAIL=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_UI_EMAIL&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+AT_UI_EMAIL=$(echo "$TOK_UI_EMAIL" | J "['access_token']")
+[ -n "$AT_UI_EMAIL" ] || fail uiemailat
+UI_EMAIL=$(curl -sf "$B/userinfo" -H "Authorization: Bearer $AT_UI_EMAIL")
+[ "$(echo "$UI_EMAIL" | J "['sub']")" = "$SUB" ] || fail uiemail_sub; ok "userinfo openid+email returns sub"
+[ "$(echo "$UI_EMAIL" | J "['email']")" = "agent7@example.com" ] || fail uiemail_email; ok "userinfo openid+email returns email"
+python3 - "$UI_EMAIL" <<'PY' || fail uiemail_leak
+import json,sys
+d=json.loads(sys.argv[1])
+assert 'name' not in d, d
+assert 'kind' not in d, d
+PY
+ok "userinfo openid+email omits name and kind"
+
+# openid+profile scope -> userinfo returns sub+name+kind, no email
+AUTHQ_UI_PROFILE="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid%20profile&state=uiprofile&nonce=uiprofilen"
+LOC_UI_PROFILE=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_UI_PROFILE")
+CODE_UI_PROFILE=$(echo "$LOC_UI_PROFILE" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_UI_PROFILE" ] || fail uiprofcode
+TOK_UI_PROFILE=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_UI_PROFILE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+AT_UI_PROFILE=$(echo "$TOK_UI_PROFILE" | J "['access_token']")
+[ -n "$AT_UI_PROFILE" ] || fail uiprofat
+UI_PROFILE=$(curl -sf "$B/userinfo" -H "Authorization: Bearer $AT_UI_PROFILE")
+[ "$(echo "$UI_PROFILE" | J "['sub']")" = "$SUB" ] || fail uiprof_sub; ok "userinfo openid+profile returns sub"
+[ "$(echo "$UI_PROFILE" | J "['name']")" = "Agent 7" ] || fail uiprof_name; ok "userinfo openid+profile returns name"
+[ "$(echo "$UI_PROFILE" | J "['kind']")" = "agent" ] || fail uiprof_kind; ok "userinfo openid+profile returns kind"
+python3 - "$UI_PROFILE" <<'PY' || fail uiprof_leak
+import json,sys
+d=json.loads(sys.argv[1])
+assert 'email' not in d, d
+PY
+ok "userinfo openid+profile omits email"
+
 # code issued, then account deleted -> invalid_grant at /token
 curl -sf -X POST "$B/v1/accounts" -d '{"handle":"ghost@example.com","password":"correct-horse-battery","kind":"agent"}' >/dev/null
 LOC_GHOST=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'ghost@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=ghost")
