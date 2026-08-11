@@ -8,7 +8,7 @@
 
 func handle_discovery(req) (res) {
     b := public_url(req)
-    res = ok_json("{\"issuer\":\"" + b + "\",\"authorization_endpoint\":\"" + b + "/authorize\",\"token_endpoint\":\"" + b + "/token\",\"userinfo_endpoint\":\"" + b + "/userinfo\",\"jwks_uri\":\"" + b + "/jwks\",\"response_types_supported\":[\"code\"],\"grant_types_supported\":[\"authorization_code\"],\"subject_types_supported\":[\"public\"],\"id_token_signing_alg_values_supported\":[\"EdDSA\"],\"scopes_supported\":[\"openid\",\"email\",\"profile\"],\"token_endpoint_auth_methods_supported\":[\"client_secret_basic\",\"client_secret_post\"],\"claims_supported\":[\"sub\",\"email\",\"name\"],\"code_challenge_methods_supported\":[\"S256\",\"plain\"]}")
+    res = ok_json("{\"issuer\":\"" + b + "\",\"authorization_endpoint\":\"" + b + "/authorize\",\"token_endpoint\":\"" + b + "/token\",\"userinfo_endpoint\":\"" + b + "/userinfo\",\"jwks_uri\":\"" + b + "/jwks\",\"response_types_supported\":[\"code\"],\"grant_types_supported\":[\"authorization_code\"],\"subject_types_supported\":[\"public\"],\"id_token_signing_alg_values_supported\":[\"EdDSA\"],\"scopes_supported\":[\"openid\",\"email\",\"profile\"],\"token_endpoint_auth_methods_supported\":[\"client_secret_basic\",\"client_secret_post\"],\"claims_supported\":[\"sub\",\"email\",\"name\",\"kind\"],\"code_challenge_methods_supported\":[\"S256\",\"plain\"]}")
 }
 
 func handle_jwks(req) (res) { res = ok_json(jwks_json()) }
@@ -135,10 +135,13 @@ func handle_authorize(req) (res) {
                 // MFL evaluates both sides of && — guard before verify_password on empty row.
                 if aok == 1 {
                     if verify_password(password, a.salt, a.pass_hash) == 1 {
-                        r := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method)
-                        sqlite_close(db)
-                        res = r
-                        return
+                        // Headless Basic auth is for agents only; humans must use the sign-in form.
+                        if a.kind == "agent" {
+                            r := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method)
+                            sqlite_close(db)
+                            res = r
+                            return
+                        }
                     }
                 }
                 if aok == 0 { burn_password_time(password) }
@@ -323,7 +326,7 @@ func handle_token(req) (res) {
         n := now()
         claims := "{\"iss\":" + json(iss) + ",\"sub\":" + json(a.sub) + ",\"aud\":" + json(cid) + ",\"iat\":" + str(n) + ",\"exp\":" + str(n + 3600)
         if scope_has(cr.scope, "email") == 1 { claims = claims + ",\"email\":" + json(a.handle) }
-        if scope_has(cr.scope, "profile") == 1 { claims = claims + ",\"name\":" + json(a.name) }
+        if scope_has(cr.scope, "profile") == 1 { claims = claims + ",\"name\":" + json(a.name) + ",\"kind\":" + json(a.kind) }
         if cr.nonce != "" { claims = claims + ",\"nonce\":" + json(cr.nonce) }
         // Bind the id_token to the authorization code and access_token via OIDC c_hash/at_hash.
         c_hash := b64url_bytes(from_hex(substr(sha256(code), 0, 32)))

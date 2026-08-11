@@ -12,7 +12,8 @@ App  →  portier (OIDC client)  →  machin-idp (OIDC provider)
 ```
 
 Register machin-idp as a generic OIDC provider (`kind=oidc`). Humans get the sign-in form;
-agents authenticate **headlessly** with HTTP Basic on `/authorize`.
+agents authenticate **headlessly** with HTTP Basic on `/authorize`. Only `kind=agent`
+principals can use the headless Basic path; `kind=human` accounts must use the form.
 
 ## 1. Register an OIDC client for your broker
 
@@ -78,6 +79,7 @@ machin-idp supports PKCE (`code_challenge` / `code_verifier`) for the authorizat
 ### Agent (headless)
 
 ```sh
+# The account must be registered with kind=agent; human accounts get 401 here.
 curl -si "$IDP/authorize?response_type=code&client_id=cid_…&redirect_uri=…&scope=openid%20email&state=x" \
   -u 'agent@example.com:correct-horse-battery'
 # → 302 Location: …?code=ac_…
@@ -95,6 +97,7 @@ curl -s -X POST "$IDP/token" -u 'cid_…:csec_…' \
 | `iss` | Issuer (`IDP_PUBLIC_URL`) |
 | `sub` | Stable account id |
 | `aud` | Client id |
+| `kind` | `human` or `agent`; included when the `profile` scope is requested |
 | `c_hash` | base64url of the first 128 bits of SHA-256 of the authorization code (token binding) |
 | `at_hash` | base64url of the first 128 bits of SHA-256 of the `access_token` (token binding) |
 | alg | `EdDSA` (Ed25519 OKP in JWKS) |
@@ -132,8 +135,8 @@ assert pay["at_hash"] == b64ue(hashlib.sha256(at.encode()).digest()[:16])
 |-----------------|----------------------|
 | `openid` | `iss`, `sub`, `aud`, `iat`, `exp`, `c_hash`, `at_hash` |
 | `openid email` | + `email` (the principal's handle) |
-| `openid profile` | + `name` |
-| `openid email profile` | + `email` and `name` |
+| `openid profile` | + `name` and `kind` (human or agent) |
+| `openid email profile` | + `email`, `name` and `kind` |
 | `email`, `profile` (no `openid`) | no `id_token`; only `access_token` |
 
 ## 6. `/userinfo` scope gating
