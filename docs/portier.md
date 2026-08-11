@@ -126,6 +126,19 @@ Ed25519PublicKey.from_public_bytes(b64u(key["x"])).verify(b64u(s), (h + '.' + p)
 | `openid email profile` | + `email` and `name` |
 | `email`, `profile` (no `openid`) | no `id_token`; only `access_token` |
 
+## 6. `/userinfo` scope gating
+
+Call `/userinfo` with the `access_token` as a `Bearer` token. The response is scope-gated just like the `id_token`:
+
+| Scope requested | Claims in `/userinfo` |
+|-----------------|-----------------------|
+| `openid` | `sub` |
+| `openid email` | `sub` + `email` |
+| `openid profile` | `sub` + `name` + `kind` (human or agent) |
+| `openid email profile` | `sub` + `email` + `name` + `kind` |
+
+A missing, expired, or unknown access token returns `401 Unauthorized` with a `WWW-Authenticate: Bearer` header.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |

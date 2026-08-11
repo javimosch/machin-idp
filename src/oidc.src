@@ -102,6 +102,12 @@ func basic_auth_rate_limited() (res) {
     res = with_header(res, "Cache-Control", "no-store")
 }
 
+// 401 for userinfo with a missing/expired/unknown access token — RFC 6750 Bearer.
+func bearer_unauthorized() (res) {
+    res = with_header(response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}"), "WWW-Authenticate", "Bearer")
+    res = with_header(res, "Cache-Control", "no-store")
+}
+
 // GET /authorize — headless (Authorization: Basic handle:password) for agents, else a form.
 func handle_authorize(req) (res) {
     db := db_open()
@@ -333,6 +339,8 @@ func handle_token(req) (res) {
 }
 
 // GET /userinfo — Bearer access_token -> claims.
+// Claims are scope-gated like the id_token: sub is always returned, email requires
+// the `email` scope, and name/kind require the `profile` scope.
 func handle_userinfo(req) (res) {
     at := header(req, "authorization")
     if has_prefix(to_lower(at), "bearer ") { at = trim(substr(at, 7, len(at))) } else { at = "" }
@@ -340,13 +348,17 @@ func handle_userinfo(req) (res) {
     if db == 0 { res = with_header(response("500 Internal Server Error", "application/json", "{\"error\":\"server_error\"}"), "Cache-Control", "no-store")  return }
     rows := sqlite_query(db, "SELECT sub, client_id, scope, expires_at FROM tokens WHERE access_token = ?", []string{at})
     list := parse(rows, []TokenRow{})
-    if len(list) == 0 { sqlite_close(db)  res = with_header(response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}"), "Cache-Control", "no-store")  return }
+    if len(list) == 0 { sqlite_close(db)  res = bearer_unauthorized()  return }
     tr := list[0]
-    if now() > tr.expires_at { sqlite_close(db)  res = with_header(response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}"), "Cache-Control", "no-store")  return }
+    if now() > tr.expires_at { sqlite_close(db)  res = bearer_unauthorized()  return }
     a, aok := account_by_sub(db, tr.sub)
     sqlite_close(db)
-    if aok == 0 { res = with_header(response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}"), "Cache-Control", "no-store")  return }
-    res = with_header(ok_json("{\"sub\":" + json(a.sub) + ",\"email\":" + json(a.handle) + ",\"name\":" + json(a.name) + ",\"kind\":" + json(a.kind) + "}"), "Cache-Control", "no-store")
+    if aok == 0 { res = bearer_unauthorized()  return }
+    body := "{\"sub\":" + json(a.sub)
+    if scope_has(tr.scope, "email") == 1 { body = body + ",\"email\":" + json(a.handle) }
+    if scope_has(tr.scope, "profile") == 1 { body = body + ",\"name\":" + json(a.name) + ",\"kind\":" + json(a.kind) }
+    body = body + "}"
+    res = with_header(ok_json(body), "Cache-Control", "no-store")
 }
 
 // ---- small helpers ----
