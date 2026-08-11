@@ -80,6 +80,10 @@ echo "$LOC_COLON" | grep -q "code=ac_" || fail colonpw; ok "Basic auth password 
 [ "$(curl -s -o /dev/null -w '%{http_code}' -u 'agent7@example.com:' "$B/authorize?$AUTHQ")" = "401" ] || fail emptypw; ok "Basic with empty password -> 401"
 BASIC_NOCOLON="Basic $(printf 'agent7@example.com' | base64 -w0)"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: $BASIC_NOCOLON" "$B/authorize?$AUTHQ")" = "401" ] || fail basicnocolon; ok "Basic payload without colon -> 401"
+# headless Basic is reserved for agent principals; humans must use the sign-in form
+curl -sf -X POST "$B/v1/accounts" -d '{"handle":"human7@example.com","password":"correct-horse-battery","kind":"human","name":"Human 7"}' >/dev/null
+HUMAN_BASIC=$(curl -s -o /dev/null -w '%{http_code}' -u 'human7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=humanbasic")
+[ "$HUMAN_BASIC" = "401" ] || fail humanbasic; ok "Basic auth rejected for kind=human"
 
 # --- rate limit: 61 failed Basic attempts -> 429 on the 61st ---
 for i in $(seq 1 60); do curl -s -o /dev/null -u 'agent7@example.com:wrong' "$B/authorize?$AUTHQ&state=rl$i"; done
@@ -135,6 +139,7 @@ assert hdr.get('kid')==jkid, (hdr, jkid)
 assert pay['iss']==iss and pay['aud']==cid and pay['sub']==sub, pay
 assert pay['email']=='agent7@example.com', pay
 assert pay.get('name')=='Agent 7', pay
+assert pay.get('kind')=='agent', pay
 assert pay.get('nonce')=='n1', pay
 import time
 now=int(time.time())
@@ -411,6 +416,9 @@ for i in $(seq 1 60); do curl -s -o /dev/null -X POST "$B/authorize/login" --dat
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=wrong-61" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formrl61")" = "429" ] || fail formratelimit; ok "61st failed form login -> 429"
 FLOC_RL=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$B/authorize/login" --data-urlencode "handle=agent7@example.com" --data-urlencode "password=correct-horse-battery" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=formrlok" --data-urlencode "nonce=n2rl")
 echo "$FLOC_RL" | grep -q "code=ac_" || fail formrlok; ok "form login succeeds after rate limit window"
+# humans must use the form; they still get an auth code via POST /authorize/login
+FLOC_HUMAN=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$B/authorize/login" --data-urlencode "handle=human7@example.com" --data-urlencode "password=correct-horse-battery" --data-urlencode "client_id=$CID" --data-urlencode "redirect_uri=http://127.0.0.1:9999/cb" --data-urlencode "scope=openid email" --data-urlencode "state=humanform" --data-urlencode "nonce=n2human")
+echo "$FLOC_HUMAN" | grep -q "code=ac_" || fail humanform; ok "human form login -> code"
 # /authorize without creds serves the sign-in form
 curl -sf "$B/authorize?$AUTHQ" | grep -q "Sign in with intrane" || fail formhtml; ok "/authorize serves a sign-in form for browsers"
 
@@ -580,8 +588,9 @@ def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
 pay = json.loads(b64u(sys.argv[1].split('.')[1]))
 assert 'email' not in pay, pay
 assert 'name' not in pay, pay
+assert 'kind' not in pay, pay
 PY
-ok "openid-only id_token omits email and name claims"
+ok "openid-only id_token omits email, name and kind claims"
 
 # --- /userinfo must not be cached ---
 LOC_UI=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=ccui2")
@@ -609,8 +618,9 @@ def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
 pay = json.loads(b64u(sys.argv[1].split('.')[1]))
 assert pay.get('email') == 'agent7@example.com', pay
 assert 'name' not in pay, pay
+assert 'kind' not in pay, pay
 PY
-ok "openid+email scope returns id_token with email claim and no name claim"
+ok "openid+email scope returns id_token with email claim and no name or kind claim"
 
 AUTHQ_OPENID_PROFILE="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid%20profile&state=oidprofile&nonce=oidprofn"
 LOC_OP=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_OPENID_PROFILE")
@@ -624,9 +634,10 @@ import sys, json, base64
 def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
 pay = json.loads(b64u(sys.argv[1].split('.')[1]))
 assert pay.get('name') == 'Agent 7', pay
+assert pay.get('kind') == 'agent', pay
 assert 'email' not in pay, pay
 PY
-ok "openid+profile scope returns id_token with name claim and no email claim"
+ok "openid+profile scope returns id_token with name and kind claims and no email claim"
 
 AUTHQ_EMAIL_PROFILE="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=email%20profile&state=nopenid2&nonce=nopenid2n"
 LOC_EP=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_EMAIL_PROFILE")
