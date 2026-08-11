@@ -273,7 +273,7 @@ func handle_token(req) (res) {
     if scope_has(cr.scope, "openid") == 1 {
         iss := public_url(req)
         n := now()
-        claims := "{\"iss\":" + json(iss) + ",\"sub\":\"" + a.sub + "\",\"aud\":\"" + cid + "\",\"iat\":" + str(n) + ",\"exp\":" + str(n + 3600)
+        claims := "{\"iss\":" + json(iss) + ",\"sub\":" + json(a.sub) + ",\"aud\":" + json(cid) + ",\"iat\":" + str(n) + ",\"exp\":" + str(n + 3600)
         if scope_has(cr.scope, "email") == 1 { claims = claims + ",\"email\":" + json(a.handle) }
         if scope_has(cr.scope, "profile") == 1 { claims = claims + ",\"name\":" + json(a.name) }
         if cr.nonce != "" { claims = claims + ",\"nonce\":" + json(cr.nonce) }
@@ -308,7 +308,7 @@ func handle_userinfo(req) (res) {
     a, aok := account_by_sub(db, tr.sub)
     sqlite_close(db)
     if aok == 0 { res = with_header(response("401 Unauthorized", "application/json", "{\"error\":\"invalid_token\"}"), "Cache-Control", "no-store")  return }
-    res = with_header(ok_json("{\"sub\":\"" + a.sub + "\",\"email\":" + json(a.handle) + ",\"name\":" + json(a.name) + ",\"kind\":\"" + a.kind + "\"}"), "Cache-Control", "no-store")
+    res = with_header(ok_json("{\"sub\":" + json(a.sub) + ",\"email\":" + json(a.handle) + ",\"name\":" + json(a.name) + ",\"kind\":" + json(a.kind) + "}"), "Cache-Control", "no-store")
 }
 
 // ---- small helpers ----

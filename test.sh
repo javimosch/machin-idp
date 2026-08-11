@@ -78,6 +78,8 @@ echo "$LOC_COLON" | grep -q "code=ac_" || fail colonpw; ok "Basic auth password 
 # empty handle or password in Basic -> 401 (not the browser form)
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Basic $(printf ':secret' | base64 -w0)" "$B/authorize?$AUTHQ")" = "401" ] || fail emptyhandle; ok "Basic with empty handle -> 401"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -u 'agent7@example.com:' "$B/authorize?$AUTHQ")" = "401" ] || fail emptypw; ok "Basic with empty password -> 401"
+BASIC_NOCOLON="Basic $(printf 'agent7@example.com' | base64 -w0)"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: $BASIC_NOCOLON" "$B/authorize?$AUTHQ")" = "401" ] || fail basicnocolon; ok "Basic payload without colon -> 401"
 
 # --- rate limit: 61 failed Basic attempts -> 429 on the 61st ---
 for i in $(seq 1 60); do curl -s -o /dev/null -u 'agent7@example.com:wrong' "$B/authorize?$AUTHQ&state=rl$i"; done
@@ -516,5 +518,79 @@ curl -s -D /tmp/idp_cc_ui -o /dev/null -H "Authorization: Bearer $AT_UI" "$B/use
 grep -qi 'Cache-Control: no-store' /tmp/idp_cc_ui || fail cc_userinfo; ok "/userinfo 200 has Cache-Control: no-store"
 curl -s -D /tmp/idp_cc_uie -o /dev/null -H "Authorization: Bearer at_nope" "$B/userinfo"
 grep -qi 'Cache-Control: no-store' /tmp/idp_cc_uie || fail cc_userinfoe; ok "/userinfo 401 has Cache-Control: no-store"
+
+# --- scope gating: email/profile claims ---
+AUTHQ_OPENID_EMAIL="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid%20email&state=oidemail&nonce=oidemailn"
+LOC_OE=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_OPENID_EMAIL")
+CODE_OE=$(echo "$LOC_OE" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_OE" ] || fail oemailcode
+TOK_OE=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_OE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+IDT_OE=$(echo "$TOK_OE" | J "['id_token']")
+[ -n "$IDT_OE" ] || fail oemailidt
+python3 - "$IDT_OE" <<'PY' || fail oemailclaims
+import sys, json, base64
+def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+pay = json.loads(b64u(sys.argv[1].split('.')[1]))
+assert pay.get('email') == 'agent7@example.com', pay
+assert 'name' not in pay, pay
+PY
+ok "openid+email scope returns id_token with email claim and no name claim"
+
+AUTHQ_OPENID_PROFILE="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid%20profile&state=oidprofile&nonce=oidprofn"
+LOC_OP=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_OPENID_PROFILE")
+CODE_OP=$(echo "$LOC_OP" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_OP" ] || fail oprofcode
+TOK_OP=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_OP&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+IDT_OP=$(echo "$TOK_OP" | J "['id_token']")
+[ -n "$IDT_OP" ] || fail oprofidt
+python3 - "$IDT_OP" <<'PY' || fail oprofclaims
+import sys, json, base64
+def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+pay = json.loads(b64u(sys.argv[1].split('.')[1]))
+assert pay.get('name') == 'Agent 7', pay
+assert 'email' not in pay, pay
+PY
+ok "openid+profile scope returns id_token with name claim and no email claim"
+
+AUTHQ_EMAIL_PROFILE="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=email%20profile&state=nopenid2&nonce=nopenid2n"
+LOC_EP=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_EMAIL_PROFILE")
+CODE_EP=$(echo "$LOC_EP" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ -n "$CODE_EP" ] || fail nopenid2code
+TOK_EP=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_EP&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")
+[ -n "$(echo "$TOK_EP" | J "['access_token']")" ] || fail nopenid2at
+python3 - "$TOK_EP" <<'PY' || fail nopenid2idt
+import sys, json
+assert 'id_token' not in json.loads(sys.argv[1]), sys.argv[1]
+PY
+ok "email+profile without openid returns access_token and no id_token"
+
+# --- EdDSA key isolation: token from one seed fails with another seed's public key ---
+WRONG_SEED=$(python3 - "$IDT" <<'PY'
+import sys, json, base64
+idt = sys.argv[1]
+def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+h, p, s = idt.split('.')
+sig = b64u(s)
+msg = (h + '.' + p).encode()
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+    wrong_pub = Ed25519PrivateKey.from_private_bytes(bytes.fromhex('2'*64)).public_key().public_bytes_raw()
+    Ed25519PublicKey.from_public_bytes(wrong_pub).verify(sig, msg)
+    print('SIGBAD')
+except ImportError:
+    print('SIGSKIP')
+except Exception:
+    print('SIGOK')
+PY
+)
+[ "$WRONG_SEED" != "SIGBAD" ] || fail wrongseed; ok "id_token EdDSA signature fails with a different seed's public key ($WRONG_SEED)"
+
+# --- missing OIDC params on /authorize ---
+curl -s "$B/authorize?client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid" | grep -qi "response_type must be code" || fail missingrt; ok "/authorize without response_type -> error"
+curl -s "$B/authorize?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid" | grep -qi "unknown client_id" || fail missingcid; ok "/authorize without client_id -> error"
+curl -s "$B/authorize?response_type=code&client_id=$CID&scope=openid" | grep -qi "redirect_uri not registered" || fail missingredir; ok "/authorize without redirect_uri -> error"
+
+# --- JWKS endpoints are identical ---
+[ "$(curl -sf "$B/jwks")" = "$(curl -sf "$B/.well-known/jwks.json")" ] || fail jwksidentical; ok "/jwks and /.well-known/jwks.json are identical"
 
 echo "ALL $P TESTS PASSED"
