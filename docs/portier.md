@@ -61,6 +61,10 @@ Request `openid` in the `scope` parameter to receive an `id_token`. `email` and 
 
 machin-idp rejects any `redirect_uri` that is not an exact match with one of the comma-separated values registered for the client. Protocol, host, port, path, and trailing slashes all matter — keep the callback URL in portier identical to the value registered in `/v1/clients`.
 
+## 3.3 PKCE
+
+machin-idp supports PKCE (`code_challenge` / `code_verifier`) for the authorization-code flow. Send `code_challenge_method=S256` on `/authorize` and include the matching `code_verifier` at `/token`. `plain` is also accepted, but `S256` is recommended. Portier can use this to harden the code exchange.
+
 ## 4. Flows
 
 ### Human (via portier)

@@ -590,6 +590,42 @@ curl -s "$B/authorize?client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%
 curl -s "$B/authorize?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid" | grep -qi "unknown client_id" || fail missingcid; ok "/authorize without client_id -> error"
 curl -s "$B/authorize?response_type=code&client_id=$CID&scope=openid" | grep -qi "redirect_uri not registered" || fail missingredir; ok "/authorize without redirect_uri -> error"
 
+# --- PKCE S256 code flow ---
+PKCE=$(python3 - <<'PY'
+import base64, hashlib, os
+v = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=').decode()
+c = base64.urlsafe_b64encode(hashlib.sha256(v.encode()).digest()).rstrip(b'=').decode()
+print(v, c)
+PY
+)
+CV=$(echo "$PKCE" | awk '{print $1}')
+CC=$(echo "$PKCE" | awk '{print $2}')
+AUTHQ_PKCE="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid%20email&state=pkce&nonce=pnc&code_challenge=$CC&code_challenge_method=S256"
+LOC_PKCE=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_PKCE")
+echo "$LOC_PKCE" | grep -q "code=ac_" || fail pkcecode; ok "headless /authorize with PKCE S256 -> code"
+CODE_PKCE=$(echo "$LOC_PKCE" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+TOK_PKCE=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_PKCE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb" --data-urlencode "code_verifier=$CV")
+[ -n "$(echo "$TOK_PKCE" | J "['access_token']")" ] || fail pkceat; ok "token exchange with PKCE S256 verifier -> access_token"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_PKCE&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb" --data-urlencode "code_verifier=wrong")" = "400" ] || fail pkcewrong; ok "PKCE S256 wrong verifier -> invalid_grant"
+# no verifier -> invalid_grant (replayed one-time code no longer exists, but the first request already consumed it; use a fresh code)
+LOC_PKCE2=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_PKCE")
+CODE_PKCE2=$(echo "$LOC_PKCE2" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_PKCE2&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb")" = "400" ] || fail pkcenoverifier; ok "PKCE S256 missing verifier -> invalid_grant"
+
+# --- PKCE plain code flow ---
+AUTHQ_PLAIN="response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid%20email&state=pkceplain&nonce=pn2&code_challenge=plaintest&code_challenge_method=plain"
+LOC_PLAIN=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'agent7@example.com:correct-horse-battery' "$B/authorize?$AUTHQ_PLAIN")
+CODE_PLAIN=$(echo "$LOC_PLAIN" | sed -n 's/.*code=\(ac_[a-f0-9]*\).*/\1/p')
+TOK_PLAIN=$(curl -sf -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_PLAIN&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb" --data-urlencode "code_verifier=plaintest")
+[ -n "$(echo "$TOK_PLAIN" | J "['access_token']")" ] || fail pkceplainat; ok "token exchange with PKCE plain verifier -> access_token"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/token" -u "$CID:$CSEC" -d "grant_type=authorization_code&code=$CODE_PLAIN&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb" --data-urlencode "code_verifier=nope")" = "400" ] || fail pkceplainwrong; ok "PKCE plain wrong verifier -> invalid_grant"
+
+# --- PKCE validation ---
+curl -s "$B/authorize?response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&scope=openid&state=badpkce&code_challenge=$CC&code_challenge_method=none" | grep -qi "invalid code" || fail pkcebadmethod; ok "unknown PKCE method -> error"
+# discovery advertises PKCE support
+D2=$(curl -sf "$B/.well-known/openid-configuration")
+[ "$(echo "$D2" | J "['code_challenge_methods_supported'][0]")" = "S256" ] || fail pkcedisc; ok "discovery advertises code_challenge_methods_supported"
+
 # --- JWKS endpoints are identical ---
 [ "$(curl -sf "$B/jwks")" = "$(curl -sf "$B/.well-known/jwks.json")" ] || fail jwksidentical; ok "/jwks and /.well-known/jwks.json are identical"
 
