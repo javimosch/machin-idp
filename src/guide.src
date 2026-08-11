@@ -34,7 +34,8 @@ func llms_txt(base) (t) {
         "POST /token       code -> {access_token, optional EdDSA id_token}\n" +
         "GET  /userinfo    Bearer access_token -> scope-gated claims (sub always; email with 'email'; name/kind with 'profile')\n\n" +
         "Signing: EdDSA (Ed25519) — modern, small keys, pure MFL. id_tokens and /userinfo carry\n" +
-        "{iss, sub, aud, iat, exp} plus scope-dependent email (email) and name (profile).\n\n" +
+        "{iss, sub, aud, iat, exp} plus scope-dependent email (email) and name (profile).\n" +
+        "id_tokens also carry c_hash and at_hash so a broker can bind them to the code and access_token.\n\n" +
         "## Broker integration (e.g. portier)\n\n" +
         "Register machin-idp as a generic OIDC provider in your broker.\n" +
         "Step-by-step: https://javimosch.github.io/machin-idp/portier.html or docs/portier.md.\n"
