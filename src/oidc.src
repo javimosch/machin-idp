@@ -141,6 +141,7 @@ func handle_authorize(req) (res) {
                         return
                     }
                 }
+                if aok == 0 { burn_password_time(password) }
             }
         }
         if rate_allow(db, "ba:" + client_ip(req), 60, 60) == false {
@@ -182,7 +183,10 @@ func handle_authorize_login(req) (res) {
     if okr == 0 { sqlite_close(db)  res = html_error("invalid client/redirect")  return }
     a, aok := account_by_handle(db, handle)
     bad := 0
-    if aok == 0 { bad = 1 } else if verify_password(password, a.salt, a.pass_hash) == 0 { bad = 1 }
+    if aok == 0 {
+        burn_password_time(password)
+        bad = 1
+    } else if verify_password(password, a.salt, a.pass_hash) == 0 { bad = 1 }
     if bad == 1 {
         if rate_allow(db, "fl:" + client_ip(req), 60, 60) == false {
             sqlite_close(db)
@@ -321,7 +325,10 @@ func handle_token(req) (res) {
         if scope_has(cr.scope, "email") == 1 { claims = claims + ",\"email\":" + json(a.handle) }
         if scope_has(cr.scope, "profile") == 1 { claims = claims + ",\"name\":" + json(a.name) }
         if cr.nonce != "" { claims = claims + ",\"nonce\":" + json(cr.nonce) }
-        claims = claims + "}"
+        // Bind the id_token to the authorization code and access_token via OIDC c_hash/at_hash.
+        c_hash := b64url_bytes(from_hex(substr(sha256(code), 0, 32)))
+        at_hash := b64url_bytes(from_hex(substr(sha256(at), 0, 32)))
+        claims = claims + ",\"c_hash\":" + json(c_hash) + ",\"at_hash\":" + json(at_hash) + "}"
         idt = jwt_eddsa(claims)
         sqlite_close(db)
         if idt == "" {

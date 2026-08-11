@@ -223,6 +223,19 @@ assert abs(pay['iat']-now)<=60, pay
 assert abs(pay['exp']-(now+3600))<=60, pay
 PY
 ok "id_token iat/exp within ±60s"
+python3 - "$IDT" "$CODE" "$AT" <<'PY' || fail hashes
+import sys, json, base64, hashlib
+idt, code, at = sys.argv[1:4]
+def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+def b64ue(b): return base64.urlsafe_b64encode(b).decode().rstrip('=')
+h, p, s = idt.split('.')
+pay = json.loads(b64u(p))
+c_half = hashlib.sha256(code.encode()).digest()[:16]
+at_half = hashlib.sha256(at.encode()).digest()[:16]
+assert pay.get('c_hash') == b64ue(c_half), pay
+assert pay.get('at_hash') == b64ue(at_half), pay
+PY
+ok "id_token c_hash/at_hash bind auth code and access token"
 # id_token claims survive JSON-special characters in name (EdDSA payload must stay valid JSON)
 ./machin-idp account-new -handle json@example.com -password correct-horse-battery -name 'Agent "Seven"' -kind agent >/dev/null
 LOC_JSON=$(curl -s -o /dev/null -w '%{redirect_url}' -u 'json@example.com:correct-horse-battery' "$B/authorize?$AUTHQ&state=jsonname&nonce=jsonn")

@@ -68,6 +68,12 @@ func verify_password(password, salt_hex, expected_hex) (ok) {
     if hash_password(password, salt_hex) == expected_hex { ok = 1 }
 }
 
+// burn_password_time runs a dummy PBKDF2 check so unknown-handle failures take the
+// same wall-clock time as wrong-password failures, preventing user-enumeration by timing.
+func burn_password_time(password) {
+    _ := verify_password(password, "00000000000000000000000000000000", "0000000000000000000000000000000000000000000000000000000000000000")
+}
+
 // ---- base64url (JWT) ----
 
 func b64url_bytes(b) (s) {
@@ -150,11 +156,15 @@ func signing_kid() (k) {
 // Rejects malformed claims before signing — a broken payload must not leave the IdP.
 func jwt_eddsa(claims_json) (jwt) {
     jwt = ""
-    _, err := json_get(claims_json, ".iss")
+    iss, err := json_get(claims_json, ".iss")
+    if err != "" || len(unq(iss)) == 0 { return }
+    sub, err := json_get(claims_json, ".sub")
+    if err != "" || len(unq(sub)) == 0 { return }
+    aud, err := json_get(claims_json, ".aud")
+    if err != "" || len(unq(aud)) == 0 { return }
+    _, err = json_get(claims_json, ".iat")
     if err != "" { return }
-    _, err = json_get(claims_json, ".sub")
-    if err != "" { return }
-    _, err = json_get(claims_json, ".aud")
+    _, err = json_get(claims_json, ".exp")
     if err != "" { return }
     header := "{\"alg\":\"EdDSA\",\"typ\":\"JWT\",\"kid\":\"" + signing_kid() + "\"}"
     signing_input := b64url_str(header) + "." + b64url_str(claims_json)

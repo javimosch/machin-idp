@@ -95,32 +95,42 @@ curl -s -X POST "$IDP/token" -u 'cid_…:csec_…' \
 | `iss` | Issuer (`IDP_PUBLIC_URL`) |
 | `sub` | Stable account id |
 | `aud` | Client id |
+| `c_hash` | base64url of the first 128 bits of SHA-256 of the authorization code (token binding) |
+| `at_hash` | base64url of the first 128 bits of SHA-256 of the `access_token` (token binding) |
 | alg | `EdDSA` (Ed25519 OKP in JWKS) |
 
 `state` and `nonce` are optional but recommended. `state` is echoed back to the `redirect_uri` unchanged; `nonce` is included in the `id_token` payload when `openid` is requested.
 
 ## 5. Validating EdDSA id_tokens
 
-portier should verify the `id_token` against the Ed25519 public key in `$IDP/jwks` (`kty=OKP`, `crv=Ed25519`, `alg=EdDSA`). The signature covers the `header.payload` bytes.
+portier should verify the `id_token` against the Ed25519 public key in `$IDP/jwks` (`kty=OKP`, `crv=Ed25519`, `alg=EdDSA`). The signature covers the `header.payload` bytes. When an `id_token` is issued, it also carries `c_hash` and `at_hash` so portier can bind it to the authorization code and access_token.
 
 ```python
-import json, base64, urllib.request
+import json, base64, urllib.request, hashlib
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+def b64ue(b): return base64.urlsafe_b64encode(b).decode().rstrip('=')
 
 IDP = "http://127.0.0.1:8798"
-idt = "..."  # id_token from /token
+idt = "..."          # id_token from /token
+code = "..."         # authorization code returned by /authorize
+at = "..."           # access_token returned by /token
 jwks = json.loads(urllib.request.urlopen(f"{IDP}/jwks").read())
 kid = json.loads(b64u(idt.split('.')[0]))["kid"]
 key = next(k for k in jwks["keys"] if k["kid"] == kid)
 h, p, s = idt.split('.')
+pay = json.loads(b64u(p))
+# verify EdDSA signature
 Ed25519PublicKey.from_public_bytes(b64u(key["x"])).verify(b64u(s), (h + '.' + p).encode())
+# verify token binding hashes
+assert pay["c_hash"] == b64ue(hashlib.sha256(code.encode()).digest()[:16])
+assert pay["at_hash"] == b64ue(hashlib.sha256(at.encode()).digest()[:16])
 ```
 
 | Scope requested | Claims in `id_token` |
 |-----------------|----------------------|
-| `openid` | `iss`, `sub`, `aud`, `iat`, `exp` |
+| `openid` | `iss`, `sub`, `aud`, `iat`, `exp`, `c_hash`, `at_hash` |
 | `openid email` | + `email` (the principal's handle) |
 | `openid profile` | + `name` |
 | `openid email profile` | + `email` and `name` |
