@@ -95,6 +95,33 @@ curl -s -X POST "$IDP/token" -u 'cid_…:csec_…' \
 
 `state` and `nonce` are optional but recommended. `state` is echoed back to the `redirect_uri` unchanged; `nonce` is included in the `id_token` payload when `openid` is requested.
 
+## 5. Validating EdDSA id_tokens
+
+portier should verify the `id_token` against the Ed25519 public key in `$IDP/jwks` (`kty=OKP`, `crv=Ed25519`, `alg=EdDSA`). The signature covers the `header.payload` bytes.
+
+```python
+import json, base64, urllib.request
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+def b64u(s): return base64.urlsafe_b64decode(s + '='*(-len(s)%4))
+
+IDP = "http://127.0.0.1:8798"
+idt = "..."  # id_token from /token
+jwks = json.loads(urllib.request.urlopen(f"{IDP}/jwks").read())
+kid = json.loads(b64u(idt.split('.')[0]))["kid"]
+key = next(k for k in jwks["keys"] if k["kid"] == kid)
+h, p, s = idt.split('.')
+Ed25519PublicKey.from_public_bytes(b64u(key["x"])).verify(b64u(s), (h + '.' + p).encode())
+```
+
+| Scope requested | Claims in `id_token` |
+|-----------------|----------------------|
+| `openid` | `iss`, `sub`, `aud`, `iat`, `exp` |
+| `openid email` | + `email` (the principal's handle) |
+| `openid profile` | + `name` |
+| `openid email profile` | + `email` and `name` |
+| `email`, `profile` (no `openid`) | no `id_token`; only `access_token` |
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
