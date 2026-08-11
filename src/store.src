@@ -22,7 +22,9 @@ func db_migrate(db) {
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS accounts(sub TEXT PRIMARY KEY, handle TEXT UNIQUE, name TEXT DEFAULT '', pass_hash TEXT, salt TEXT, kind TEXT DEFAULT 'agent', created_at INTEGER)")
     // an OIDC relying client (e.g. portier)
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS clients(client_id TEXT PRIMARY KEY, secret_hash TEXT, name TEXT DEFAULT '', redirect_uris TEXT DEFAULT '', created_at INTEGER)")
-    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS codes(code TEXT PRIMARY KEY, client_id TEXT, sub TEXT, redirect_uri TEXT, scope TEXT, nonce TEXT DEFAULT '', expires_at INTEGER)")
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS codes(code TEXT PRIMARY KEY, client_id TEXT, sub TEXT, redirect_uri TEXT, scope TEXT, nonce TEXT DEFAULT '', code_challenge TEXT DEFAULT '', code_challenge_method TEXT DEFAULT '', expires_at INTEGER)")
+    sqlite_exec(db, "ALTER TABLE codes ADD COLUMN code_challenge TEXT DEFAULT ''")
+    sqlite_exec(db, "ALTER TABLE codes ADD COLUMN code_challenge_method TEXT DEFAULT ''")
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS tokens(access_token TEXT PRIMARY KEY, sub TEXT, client_id TEXT, scope TEXT, expires_at INTEGER)")
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS ratelimit(k TEXT PRIMARY KEY, win INTEGER, n INTEGER)")
     // open feedback intake (machin-feedback contract): idempotent on client id
@@ -76,6 +78,18 @@ func b64url_bytes(b) (s) {
 }
 
 func b64url_str(str) (s) { s = b64url_bytes(bytes(str)) }
+
+// pkce_challenge returns the code_challenge expected for a given verifier and method.
+func pkce_challenge(verifier, method) (challenge) {
+    challenge = ""
+    if method == "S256" {
+        h := sha256(verifier)
+        b := from_hex(h)
+        challenge = b64url_bytes(b)
+    } else if method == "plain" {
+        challenge = verifier
+    }
+}
 
 // ---- Ed25519 signing key (JWT / JWKS) ----
 // Seed is IDP_ED25519_SEED (64 hex chars). A dev seed is used if unset (warned at boot).
@@ -202,12 +216,14 @@ func client_by_id(db, cid) (c, ok) {
 }
 
 type CodeRow struct {
-    client_id    string
-    sub          string
-    redirect_uri string
-    scope        string
-    nonce        string
-    expires_at   int
+    client_id             string
+    sub                   string
+    redirect_uri          string
+    scope                 string
+    nonce                 string
+    code_challenge        string
+    code_challenge_method string
+    expires_at            int
 }
 
 type TokenRow struct {

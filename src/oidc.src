@@ -8,7 +8,7 @@
 
 func handle_discovery(req) (res) {
     b := public_url(req)
-    res = ok_json("{\"issuer\":\"" + b + "\",\"authorization_endpoint\":\"" + b + "/authorize\",\"token_endpoint\":\"" + b + "/token\",\"userinfo_endpoint\":\"" + b + "/userinfo\",\"jwks_uri\":\"" + b + "/jwks\",\"response_types_supported\":[\"code\"],\"grant_types_supported\":[\"authorization_code\"],\"subject_types_supported\":[\"public\"],\"id_token_signing_alg_values_supported\":[\"EdDSA\"],\"scopes_supported\":[\"openid\",\"email\",\"profile\"],\"token_endpoint_auth_methods_supported\":[\"client_secret_basic\",\"client_secret_post\"],\"claims_supported\":[\"sub\",\"email\",\"name\"]}")
+    res = ok_json("{\"issuer\":\"" + b + "\",\"authorization_endpoint\":\"" + b + "/authorize\",\"token_endpoint\":\"" + b + "/token\",\"userinfo_endpoint\":\"" + b + "/userinfo\",\"jwks_uri\":\"" + b + "/jwks\",\"response_types_supported\":[\"code\"],\"grant_types_supported\":[\"authorization_code\"],\"subject_types_supported\":[\"public\"],\"id_token_signing_alg_values_supported\":[\"EdDSA\"],\"scopes_supported\":[\"openid\",\"email\",\"profile\"],\"token_endpoint_auth_methods_supported\":[\"client_secret_basic\",\"client_secret_post\"],\"claims_supported\":[\"sub\",\"email\",\"name\"],\"code_challenge_methods_supported\":[\"S256\",\"plain\"]}")
 }
 
 func handle_jwks(req) (res) { res = ok_json(jwks_json()) }
@@ -39,15 +39,34 @@ func redirect_uri_safe(uri) (ok) {
     if index(uri, "\n") >= 0 { ok = 0 }
 }
 
+// pkce_valid normalizes and validates a code_challenge / code_challenge_method pair.
+// Empty values are valid (client does not use PKCE). A challenge with no method defaults to plain.
+func pkce_valid(challenge, method) (ok, out_method) {
+    ok = 1
+    out_method = method
+    if challenge == "" {
+        if method != "" { ok = 0 }
+        return
+    }
+    if index(challenge, "\r") >= 0 || index(challenge, "\n") >= 0 || index(challenge, " ") >= 0 || len(challenge) > 128 { ok = 0  return }
+    if method == "" { out_method = "plain" }
+    if out_method != "S256" && out_method != "plain" { ok = 0 }
+}
+
 // validate the authorize request; returns the client + resolved params or an error string.
-func authorize_params(db, req) (cid, redirect_uri, scope, state, nonce, err) {
+func authorize_params(db, req) (cid, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method, err) {
     err = ""
     cid = query(req, "client_id")
     redirect_uri = query(req, "redirect_uri")
     scope = query(req, "scope")
     state = query(req, "state")
     nonce = query(req, "nonce")
+    code_challenge = query(req, "code_challenge")
+    code_challenge_method = query(req, "code_challenge_method")
     if redirect_uri_safe(redirect_uri) == 0 { err = "redirect_uri contains invalid characters"  return }
+    cc_ok, cc_method := pkce_valid(code_challenge, code_challenge_method)
+    if cc_ok == 0 { err = "invalid code_challenge / code_challenge_method"  return }
+    code_challenge_method = cc_method
     rt := query(req, "response_type")
     if rt != "code" { err = "response_type must be code"  return }
     c, ok := client_by_id(db, cid)
@@ -60,9 +79,9 @@ func authorize_params(db, req) (cid, redirect_uri, scope, state, nonce, err) {
 }
 
 // issue an auth code for sub and 302 to the client's redirect_uri.
-func issue_code_redirect(db, cid, sub, redirect_uri, scope, state, nonce) (res) {
+func issue_code_redirect(db, cid, sub, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method) (res) {
     code := "ac_" + newid()
-    sqlite_exec(db, "INSERT INTO codes(code, client_id, sub, redirect_uri, scope, nonce, expires_at) VALUES(?,?,?,?,?,?,?)", []string{code, cid, sub, redirect_uri, scope, nonce, str(now() + 600)})
+    sqlite_exec(db, "INSERT INTO codes(code, client_id, sub, redirect_uri, scope, nonce, code_challenge, code_challenge_method, expires_at) VALUES(?,?,?,?,?,?,?,?,?)", []string{code, cid, sub, redirect_uri, scope, nonce, code_challenge, code_challenge_method, str(now() + 600)})
     sep := "?"
     if index(redirect_uri, "?") >= 0 { sep = "&" }
     dest := redirect_uri + sep + "code=" + url_encode(code)
@@ -87,7 +106,7 @@ func basic_auth_rate_limited() (res) {
 func handle_authorize(req) (res) {
     db := db_open()
     if db == 0 { res = html_error("db error")  return }
-    cid, redirect_uri, scope, state, nonce, err := authorize_params(db, req)
+    cid, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method, err := authorize_params(db, req)
     if err != "" { sqlite_close(db)  res = html_error(err)  return }
 
     // headless agent path: HTTP Basic with the principal's handle:password
@@ -110,7 +129,7 @@ func handle_authorize(req) (res) {
                 // MFL evaluates both sides of && — guard before verify_password on empty row.
                 if aok == 1 {
                     if verify_password(password, a.salt, a.pass_hash) == 1 {
-                        r := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce)
+                        r := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method)
                         sqlite_close(db)
                         res = r
                         return
@@ -129,7 +148,7 @@ func handle_authorize(req) (res) {
     }
     sqlite_close(db)
     // human path: a minimal login form that re-submits the oidc params
-    res = with_header(ok_html(login_form(public_url(req), cid, redirect_uri, scope, state, nonce)), "Cache-Control", "no-store")
+    res = with_header(ok_html(login_form(public_url(req), cid, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method)), "Cache-Control", "no-store")
 }
 
 // POST /authorize/login — the form submit (form-encoded handle/password + oidc params).
@@ -143,7 +162,12 @@ func handle_authorize_login(req) (res) {
     scope := form_field(req.body, "scope")
     state := form_field(req.body, "state")
     nonce := form_field(req.body, "nonce")
+    code_challenge := form_field(req.body, "code_challenge")
+    code_challenge_method := form_field(req.body, "code_challenge_method")
     if redirect_uri_safe(redirect_uri) == 0 { sqlite_close(db)  res = html_error("invalid client/redirect")  return }
+    cc_ok, cc_method := pkce_valid(code_challenge, code_challenge_method)
+    if cc_ok == 0 { sqlite_close(db)  res = html_error("invalid client/redirect")  return }
+    code_challenge_method = cc_method
     c, cok := client_by_id(db, cid)
     okr := 0
     if cok == 1 {
@@ -156,14 +180,14 @@ func handle_authorize_login(req) (res) {
     if bad == 1 {
         if rate_allow(db, "fl:" + client_ip(req), 60, 60) == false {
             sqlite_close(db)
-            res = with_header(response("429 Too Many Requests", "text/html; charset=utf-8", login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">too many attempts — try again later</p>")), "Cache-Control", "no-store")
+            res = with_header(response("429 Too Many Requests", "text/html; charset=utf-8", login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method, "<p style=\"color:#f87171\">too many attempts — try again later</p>")), "Cache-Control", "no-store")
             return
         }
         sqlite_close(db)
-        res = with_header(ok_html(login_form_err(public_url(req), cid, redirect_uri, scope, state, nonce)), "Cache-Control", "no-store")
+        res = with_header(ok_html(login_form_err(public_url(req), cid, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method)), "Cache-Control", "no-store")
         return
     }
-    rr := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce)
+    rr := issue_code_redirect(db, cid, a.sub, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method)
     sqlite_close(db)
     res = rr
 }
@@ -188,6 +212,11 @@ func handle_authorize_signup(req) (res) {
     scope := form_field(req.body, "scope")
     state := form_field(req.body, "state")
     nonce := form_field(req.body, "nonce")
+    code_challenge := form_field(req.body, "code_challenge")
+    code_challenge_method := form_field(req.body, "code_challenge_method")
+    cc_ok, cc_method := pkce_valid(code_challenge, code_challenge_method)
+    if cc_ok == 0 { sqlite_close(db)  res = html_error("invalid client/redirect")  return }
+    code_challenge_method = cc_method
     c, cok := client_by_id(db, cid)
     okr := 0
     if cok == 1 {
@@ -196,13 +225,13 @@ func handle_authorize_signup(req) (res) {
     if okr == 0 { sqlite_close(db)  res = html_error("invalid client/redirect")  return }
     if handle == "" || len(password) < 8 {
         sqlite_close(db)
-        res = with_header(ok_html(login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">handle and password (min 8 chars) required</p>")), "Cache-Control", "no-store")
+        res = with_header(ok_html(login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method, "<p style=\"color:#f87171\">handle and password (min 8 chars) required</p>")), "Cache-Control", "no-store")
         return
     }
     _, exists := account_by_handle(db, handle)
     if exists == 1 {
         sqlite_close(db)
-        res = with_header(ok_html(login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">that handle is taken — sign in instead</p>")), "Cache-Control", "no-store")
+        res = with_header(ok_html(login_form_msg(public_url(req), cid, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method, "<p style=\"color:#f87171\">that handle is taken — sign in instead</p>")), "Cache-Control", "no-store")
         return
     }
     sub := "u_" + newid()
@@ -210,7 +239,7 @@ func handle_authorize_signup(req) (res) {
     ph := hash_password(password, salt)
     sqlite_exec(db, "INSERT INTO accounts(sub, handle, name, pass_hash, salt, kind, created_at) VALUES(?,?,?,?,?,?,?)", []string{sub, handle, name, ph, salt, "human", str(now())})
     write(2, "{\"event\":\"account_created\",\"via\":\"signup\",\"sub\":\"" + sub + "\"}\n")
-    rr := issue_code_redirect(db, cid, sub, redirect_uri, scope, state, nonce)
+    rr := issue_code_redirect(db, cid, sub, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method)
     sqlite_close(db)
     res = rr
 }
@@ -253,7 +282,8 @@ func handle_token(req) (res) {
     }
     code := form_field(req.body, "code")
     req_redirect := form_field(req.body, "redirect_uri")
-    rows := sqlite_query(db, "SELECT client_id, sub, redirect_uri, scope, nonce, expires_at FROM codes WHERE code = ?", []string{code})
+    verifier := form_field(req.body, "code_verifier")
+    rows := sqlite_query(db, "SELECT client_id, sub, redirect_uri, scope, nonce, code_challenge, code_challenge_method, expires_at FROM codes WHERE code = ?", []string{code})
     list := parse(rows, []CodeRow{})
     if len(list) == 0 { sqlite_close(db)  res = with_header(bad_request("{\"error\":\"invalid_grant\"}"), "Cache-Control", "no-store")  return }
     cr := list[0]
@@ -262,6 +292,14 @@ func handle_token(req) (res) {
         sqlite_close(db)
         res = with_header(bad_request("{\"error\":\"invalid_grant\"}"), "Cache-Control", "no-store")
         return
+    }
+    if cr.code_challenge != "" {
+        expected := pkce_challenge(verifier, cr.code_challenge_method)
+        if expected != cr.code_challenge {
+            sqlite_close(db)
+            res = with_header(bad_request("{\"error\":\"invalid_grant\"}"), "Cache-Control", "no-store")
+            return
+        }
     }
     a, aok := account_by_sub(db, cr.sub)
     if aok == 0 { sqlite_close(db)  res = with_header(bad_request("{\"error\":\"invalid_grant\"}"), "Cache-Control", "no-store")  return }
@@ -328,13 +366,13 @@ func form_field(body, name) (v) {
     }
 }
 
-func login_form(base, cid, redirect_uri, scope, state, nonce) (h) {
-    h = login_form_msg(base, cid, redirect_uri, scope, state, nonce, "")
+func login_form(base, cid, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method) (h) {
+    h = login_form_msg(base, cid, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method, "")
 }
-func login_form_err(base, cid, redirect_uri, scope, state, nonce) (h) {
-    h = login_form_msg(base, cid, redirect_uri, scope, state, nonce, "<p style=\"color:#f87171\">invalid credentials</p>")
+func login_form_err(base, cid, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method) (h) {
+    h = login_form_msg(base, cid, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method, "<p style=\"color:#f87171\">invalid credentials</p>")
 }
-func login_form_msg(base, cid, redirect_uri, scope, state, nonce, msg) (h) {
-    hid := "<input type=hidden name=client_id value=\"" + html_escape(cid) + "\"><input type=hidden name=redirect_uri value=\"" + html_escape(redirect_uri) + "\"><input type=hidden name=scope value=\"" + html_escape(scope) + "\"><input type=hidden name=state value=\"" + html_escape(state) + "\"><input type=hidden name=nonce value=\"" + html_escape(nonce) + "\">"
+func login_form_msg(base, cid, redirect_uri, scope, state, nonce, code_challenge, code_challenge_method, msg) (h) {
+    hid := "<input type=hidden name=client_id value=\"" + html_escape(cid) + "\"><input type=hidden name=redirect_uri value=\"" + html_escape(redirect_uri) + "\"><input type=hidden name=scope value=\"" + html_escape(scope) + "\"><input type=hidden name=state value=\"" + html_escape(state) + "\"><input type=hidden name=nonce value=\"" + html_escape(nonce) + "\"><input type=hidden name=code_challenge value=\"" + html_escape(code_challenge) + "\"><input type=hidden name=code_challenge_method value=\"" + html_escape(code_challenge_method) + "\">"
     h = "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Sign in — intrane</title><style>body{font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;display:grid;place-items:center;min-height:100vh;margin:0}form{max-width:320px;width:90%}input[type=text],input[type=password]{width:100%;box-sizing:border-box;background:#101014;border:1px solid #1f1f26;border-radius:8px;color:#e2e8f0;padding:10px;margin:6px 0;font-family:inherit}button{width:100%;background:#38bdf8;color:#000;border:0;border-radius:8px;padding:10px;font-weight:600;cursor:pointer;margin-top:8px}h1{font-size:1.2rem}small{color:#8b93a3}</style></head><body><form method=post action=\"" + html_escape(base) + "/authorize/login\"><h1>Sign in with intrane</h1>" + msg + "<input type=text name=handle placeholder=\"handle / email\" autofocus><input type=password name=password placeholder=\"password\">" + hid + "<button>Continue</button></form><hr style=\"border-color:#1f1f26;margin:18px 0\"><form method=post action=\"" + html_escape(base) + "/authorize/signup\"><h1 style=\"font-size:1rem\">New here? Create an account</h1><input type=text name=handle placeholder=\"email\"><input type=password name=password placeholder=\"password (min 8 chars)\"><input type=text name=name placeholder=\"name (optional)\">" + hid + "<button>Create account &amp; continue</button></form><p><small>Agents: send Authorization: Basic on /authorize to skip this form.</small></p></body></html>"
 }
