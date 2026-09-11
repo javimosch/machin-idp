@@ -56,7 +56,7 @@ func help_text() (h) {
         "  client-new -name x -redirect https://..\n" +
         "  accounts | clients [-limit 50]\n" +
         "  stats | guide | version | help | help-json\n\n" +
-        "env: IDP_DB IDP_PUBLIC_URL IDP_ED25519_SEED (64 hex) IDP_KID\n"
+        "env: IDP_DB IDP_PUBLIC_URL IDP_ED25519_SEED (64 hex) IDP_KID IDP_DISABLE_SIGNUP (1=close self-registration; use account-new CLI)\n"
 }
 
 func help_json() (h) {

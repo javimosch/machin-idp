@@ -3,6 +3,7 @@
 //   POST /v1/clients  {name, redirect_uris}              register an OIDC client
 
 func handle_account_create(req) (res) {
+    if signup_disabled() == 1 { res = response("403 Forbidden", "application/json", "{\"ok\":0,\"error\":\"sign-up is disabled on this IdP\"}")  return }
     db := db_open()
     if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
     if rate_allow(db, "ac:" + client_ip(req), 3600, 30) == false {

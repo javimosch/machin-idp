@@ -5,6 +5,12 @@ func db_path() (p) {
     if p == "" { p = env("HOME") + "/.machin-idp/data.db" }
 }
 
+func signup_disabled() (d) {
+    d = 0
+    v := env("IDP_DISABLE_SIGNUP")
+    if v == "1" || v == "true" { d = 1 }
+}
+
 func db_open() (db) {
     p := db_path()
     i := len(p) - 1
