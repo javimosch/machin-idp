@@ -64,3 +64,69 @@ func handle_client_create(req) (res) {
     sqlite_close(db)
     res = created("{\"ok\":1,\"client_id\":\"" + cid + "\",\"client_secret\":\"" + secret + "\",\"note\":\"save the secret — shown once. Point your OIDC client (or portier kind=oidc) at " + public_url(req) + "/.well-known/openid-configuration\"}")
 }
+
+// POST /v1/agents {handle, name?}  — admin-gated minting of AGENT principals.
+//
+// Why this exists, and why it is not "create an account":
+// an identity minted here is valid at EVERY app that uses this IdP, so the
+// capability to mint one is effectively an estate-wide key. The caller holding
+// it (creneau, today) is an internet-facing service with an open public write,
+// so the endpoint is deliberately narrow:
+//   - kind is FORCED to agent and a body asking for human is REFUSED outright,
+//     not silently downgraded. An agent cannot use the browser sign-in form
+//     (see oidc.src), so a stolen admin token cannot mint a principal that
+//     logs into a human session anywhere in the estate.
+//   - the password is generated HERE, not chosen by the caller, so a weak
+//     caller cannot produce a weak principal. It is returned exactly once.
+// Works even when public sign-up is disabled: this is a different door, with
+// its own lock, not a bypass of that flag.
+func handle_agent_create(req) (res) {
+    want := env("IDP_ADMIN_TOKEN")
+    if want == "" {
+        res = response("501 Not Implemented", "application/json", "{\"ok\":0,\"error\":\"agent minting is not enabled on this IdP (set IDP_ADMIN_TOKEN)\"}")
+        return
+    }
+    got := ""
+    auth := header(req, "authorization")
+    if len(auth) > 7 && substr(auth, 0, 7) == "Bearer " { got = trim(substr(auth, 7, len(auth))) }
+    if got == "" || got != want {
+        res = response("403 Forbidden", "application/json", "{\"ok\":0,\"error\":\"a valid admin token is required\"}")
+        return
+    }
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    if rate_allow(db, "ag:" + client_ip(req), 3600, 60) == false {
+        sqlite_close(db)
+        res = response("429 Too Many Requests", "application/json", "{\"ok\":0,\"error\":\"too many agent registrations\"}")
+        return
+    }
+    kdv, kderr := json_get(req.body, ".kind")
+    if kderr == "" && unq(kdv) != "" && unq(kdv) != "agent" {
+        sqlite_close(db)
+        res = bad_request("{\"ok\":0,\"error\":\"this endpoint mints agents only; kind must be omitted or 'agent'\"}")
+        return
+    }
+    hnv, hnerr := json_get(req.body, ".handle")
+    nmv, _ := json_get(req.body, ".name")
+    handle := unq(hnv)
+    name := unq(nmv)
+    if hnerr != "" || handle == "" {
+        sqlite_close(db)
+        res = bad_request("{\"ok\":0,\"error\":\"handle required\"}")
+        return
+    }
+    _, exists := account_by_handle(db, handle)
+    if exists == 1 {
+        sqlite_close(db)
+        res = response("409 Conflict", "application/json", "{\"ok\":0,\"error\":\"handle already registered\"}")
+        return
+    }
+    password := to_hex(rand_bytes(24))
+    sub := "u_" + newid()
+    salt := to_hex(rand_bytes(16))
+    ph := hash_password(password, salt)
+    sqlite_exec(db, "INSERT INTO accounts(sub, handle, name, pass_hash, salt, kind, created_at) VALUES(?,?,?,?,?,?,?)", []string{sub, handle, name, ph, salt, "agent", str(now())})
+    sqlite_close(db)
+    write(2, "{\"event\":\"agent_minted\",\"sub\":\"" + sub + "\"}\n")
+    res = created("{\"ok\":1,\"sub\":\"" + sub + "\",\"handle\":" + json(handle) + ",\"kind\":\"agent\",\"password\":" + json(password) + ",\"note\":\"the password is shown once and is not recoverable. The agent authenticates headlessly: Authorization: Basic handle:password on /authorize.\"}")
+}
