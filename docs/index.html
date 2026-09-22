@@ -22,7 +22,7 @@ a{color:var(--acc)}footer{margin-top:3rem;color:var(--dim);font-size:12.5px}
 </head>
 <body>
 <main>
-<div><span class="tag">open source</span><span class="tag">standards OIDC</span><span class="tag">EdDSA id_tokens</span><span class="tag">headless login</span></div>
+<div><span class="tag">open source</span><span class="tag">standards OIDC</span><span class="tag">EdDSA id_tokens</span><span class="tag">headless login</span><span class="tag">agent minting</span><span class="tag">invitations</span></div>
 <h1><em>machin-idp</em> — OIDC for humans and agents</h1>
 <p><strong>Self-host an identity provider under your brand.</strong> Standards OIDC (discovery, JWKS, EdDSA-signed id_tokens). Principals can be humans or agents; login works headlessly. One static <a href="https://github.com/javimosch/machin">machin (MFL)</a> binary — no RSA, no runtime. There is no public hosted IdP for this project.</p>
 
@@ -45,6 +45,32 @@ curl -si "http://127.0.0.1:8798/authorize?response_type=code&amp;client_id=cid_�
 <div class="card"><h3>Humans and agents, one directory</h3><p>A human gets a minimal sign-in form; an agent sends Basic auth and skips it. Same OIDC code flow, same id_token.</p></div>
 <div class="card"><h3>Real OIDC, pure MFL</h3><p>Discovery, JWKS, and <strong>EdDSA (Ed25519)</strong> id_token signatures — asymmetric tokens any modern client verifies, no RSA, one static binary.</p></div>
 </div>
+
+<h2>provisioning</h2>
+<p>Open sign-up is often the wrong default for an IdP: an identity here is valid at
+<strong>every app</strong> that uses it, so whoever can mint one holds a wide key. Set
+<code>IDP_DISABLE_SIGNUP=1</code> to close <code>/v1/accounts</code>, then provision through one of two
+admin-gated doors — each shaped so the caller cannot do the dangerous half.</p>
+
+<div class="grid">
+<div class="card"><h3>Agents are minted</h3><p><code>POST /v1/agents</code> forces <code>kind=agent</code> and <strong>refuses</strong> a request for a human rather than downgrading it. The password is generated here, not chosen by the caller, and shown once. An agent cannot use the sign-in form, so a stolen admin token cannot produce a browser login.</p></div>
+<div class="card"><h3>Humans are invited</h3><p><code>POST /v1/invites</code> returns a link. The caller names <em>who</em> may join; the person sets their own password, which the caller never sees. An unaccepted invitation is inert, so a compromised caller can send unwanted mail but cannot create a usable identity.</p></div>
+</div>
+
+<pre>export IDP_ADMIN_TOKEN=$(openssl rand -hex 24)   # both doors are gated by this
+
+# mint an agent — password returned once, never recoverable
+curl -s -X POST $IDP/v1/agents -H "Authorization: Bearer $IDP_ADMIN_TOKEN" \
+  -d '{"handle":"lab-chambery@agents.example.com","name":"Chambery agent"}'
+
+# invite a human — they choose the password at the link
+curl -s -X POST $IDP/v1/invites -H "Authorization: Bearer $IDP_ADMIN_TOKEN" \
+  -d '{"handle":"volunteer@example.com","days":14}'
+# -&gt; {"invite_url":"https://idp.example.com/invite/…"}  single use</pre>
+
+<p>Both work while public sign-up is closed: they are separate doors with their own lock,
+not a bypass of that flag. Invitation tokens are stored hashed and consumed in the same
+step that creates the account, so a reload cannot mint a second identity.</p>
 
 <h2>brokers</h2>
 <p>Register machin-idp as a generic OIDC provider in any broker — including <a href="https://github.com/javimosch/portier">portier</a>. See <a href="portier.html">portier.md</a>.</p>
