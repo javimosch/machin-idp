@@ -13,6 +13,12 @@ func handle(req) (res) {
     if req.method == "POST" && p == "/v1/accounts" { res = handle_account_create(req)  return }
     if req.method == "POST" && p == "/v1/clients" { res = handle_client_create(req)  return }
     if req.method == "POST" && p == "/v1/agents" { res = handle_agent_create(req)  return }
+    if req.method == "POST" && p == "/v1/invites" { res = handle_invite_create(req)  return }
+    if has_prefix(p, "/invite/") {
+        tk := substr(p, 8, len(p))
+        if req.method == "GET" { res = handle_invite_page(req, tk)  return }
+        if req.method == "POST" { res = handle_invite_accept(req, tk)  return }
+    }
     if req.method == "POST" && p == "/authorize/login" { res = handle_authorize_login(req)  return }
     if req.method == "POST" && p == "/authorize/signup" { res = handle_authorize_signup(req)  return }
     if p == "/authorize" { res = handle_authorize(req)  return }

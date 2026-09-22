@@ -33,6 +33,9 @@ func db_migrate(db) {
     sqlite_exec(db, "ALTER TABLE codes ADD COLUMN code_challenge_method TEXT DEFAULT ''")
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS tokens(access_token TEXT PRIMARY KEY, sub TEXT, client_id TEXT, scope TEXT, expires_at INTEGER)")
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS ratelimit(k TEXT PRIMARY KEY, win INTEGER, n INTEGER)")
+    // Invitations. The token is stored HASHED: an invite is a credential that
+    // creates an identity, so a leaked database must not hand out live invites.
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS invites(token_hash TEXT PRIMARY KEY, handle TEXT, name TEXT DEFAULT '', invited_by TEXT DEFAULT '', expires_at INTEGER, used_at INTEGER DEFAULT 0, created_at INTEGER)")
     // open feedback intake (machin-feedback contract): idempotent on client id
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS feedback(id TEXT PRIMARY KEY, kind TEXT, message TEXT, context TEXT, reporter TEXT, version TEXT, created INTEGER, ip TEXT)")
 }

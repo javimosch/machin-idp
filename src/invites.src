@@ -1,0 +1,176 @@
+// Human invitations.
+//
+//   POST /v1/invites  {handle, name?, days?}   admin-gated -> an invite URL
+//   GET  /invite/<token>                        the set-a-password form
+//   POST /invite/<token>                        accept: creates the account
+//
+// Why invites rather than an admin "create human account" endpoint: an identity
+// here is valid at every app on this IdP, so a caller able to mint humans holds
+// an estate-wide key — and the first caller (creneau) is internet-facing. An
+// invite removes the dangerous half of that capability. The caller names WHO may
+// join; the person themselves sets the password, which the caller never sees and
+// never chooses. An unaccepted invite is inert.
+//
+// Agents do not come through here — they are minted directly (POST /v1/agents),
+// because an agent has no human to set a password and cannot use this form.
+
+func invite_ttl_default() (d) { d = 7 }
+
+// admin_ok reports whether the request carries the IdP admin token.
+func admin_ok(req) (ok) {
+    ok = false
+    want := env("IDP_ADMIN_TOKEN")
+    if want == "" { return }
+    auth := header(req, "authorization")
+    if len(auth) > 7 && substr(auth, 0, 7) == "Bearer " {
+        if trim(substr(auth, 7, len(auth))) == want { ok = true }
+    }
+}
+
+func handle_invite_create(req) (res) {
+    if env("IDP_ADMIN_TOKEN") == "" {
+        res = response("501 Not Implemented", "application/json", "{\"ok\":0,\"error\":\"invites are not enabled on this IdP (set IDP_ADMIN_TOKEN)\"}")
+        return
+    }
+    if admin_ok(req) == false {
+        res = response("403 Forbidden", "application/json", "{\"ok\":0,\"error\":\"a valid admin token is required\"}")
+        return
+    }
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    if rate_allow(db, "iv:" + client_ip(req), 3600, 60) == false {
+        sqlite_close(db)
+        res = response("429 Too Many Requests", "application/json", "{\"ok\":0,\"error\":\"too many invitations\"}")
+        return
+    }
+    hnv, hnerr := json_get(req.body, ".handle")
+    nmv, _ := json_get(req.body, ".name")
+    ivv, _ := json_get(req.body, ".invited_by")
+    dyv, dyerr := json_get(req.body, ".days")
+    handle := unq(hnv)
+    if hnerr != "" || handle == "" {
+        sqlite_close(db)
+        res = bad_request("{\"ok\":0,\"error\":\"handle required\"}")
+        return
+    }
+    _, exists := account_by_handle(db, handle)
+    if exists == 1 {
+        sqlite_close(db)
+        res = response("409 Conflict", "application/json", "{\"ok\":0,\"error\":\"handle already registered\"}")
+        return
+    }
+    days := invite_ttl_default()
+    if dyerr == "" {
+        n := parse_int(unq(dyv))
+        if n > 0 && n <= 30 { days = n }
+    }
+    token := to_hex(rand_bytes(24))
+    exp := now() + (days * 86400)
+    sqlite_exec(db, "INSERT INTO invites(token_hash, handle, name, invited_by, expires_at, used_at, created_at) VALUES(?,?,?,?,?,0,?)",
+        []string{tok_hash(token), handle, unq(nmv), unq(ivv), str(exp), str(now())})
+    sqlite_close(db)
+    base := public_url(req)
+    write(2, "{\"event\":\"invite_created\",\"handle\":" + json(handle) + "}\n")
+    res = created("{\"ok\":1,\"handle\":" + json(handle) + ",\"invite_url\":" + json(base + "/invite/" + token) +
+        ",\"expires_in_days\":" + str(days) + ",\"note\":\"send this link to the person. They choose their own password; it is never set here. The link works once.\"}")
+}
+
+// invite_by_token returns (handle, name, ok) for a live, unused invitation.
+func invite_by_token(db, token) (handle, name, ok) {
+    handle = ""
+    name = ""
+    ok = 0
+    rows := sqlite_query(db, "SELECT handle, name, expires_at, used_at FROM invites WHERE token_hash = ?", []string{tok_hash(token)})
+    hv, herr := json_get(rows, "[0].handle")
+    if herr != "" { return }
+    ev, _ := json_get(rows, "[0].expires_at")
+    uv, _ := json_get(rows, "[0].used_at")
+    if parse_int(unq(uv)) != 0 { return }
+    if parse_int(unq(ev)) < now() { return }
+    nv, _ := json_get(rows, "[0].name")
+    handle = unq(hv)
+    name = unq(nv)
+    ok = 1
+}
+
+func handle_invite_page(req, token) (res) {
+    db := db_open()
+    if db == 0 { res = html_error("database unavailable")  return }
+    handle, _, ok := invite_by_token(db, token)
+    sqlite_close(db)
+    if ok == 0 {
+        res = html_error("that invitation has expired or was already used — ask for a new one")
+        return
+    }
+    res = ok_html(invite_form(public_url(req), token, handle, ""))
+}
+
+func handle_invite_accept(req, token) (res) {
+    db := db_open()
+    if db == 0 { res = html_error("database unavailable")  return }
+    if rate_allow(db, "ia:" + client_ip(req), 3600, 30) == false {
+        sqlite_close(db)
+        res = html_error("too many attempts — try again later")
+        return
+    }
+    handle, name, ok := invite_by_token(db, token)
+    if ok == 0 {
+        sqlite_close(db)
+        res = html_error("that invitation has expired or was already used — ask for a new one")
+        return
+    }
+    pw := form_field(req.body, "password")
+    pw2 := form_field(req.body, "password2")
+    if len(pw) < 10 {
+        sqlite_close(db)
+        res = ok_html(invite_form(public_url(req), token, handle, "Choose a password of at least 10 characters."))
+        return
+    }
+    if pw != pw2 {
+        sqlite_close(db)
+        res = ok_html(invite_form(public_url(req), token, handle, "The two passwords did not match."))
+        return
+    }
+    // Re-check at accept time: someone may have registered this handle between
+    // the invitation being sent and it being opened.
+    _, exists := account_by_handle(db, handle)
+    if exists == 1 {
+        sqlite_exec(db, "UPDATE invites SET used_at = ? WHERE token_hash = ?", []string{str(now()), tok_hash(token)})
+        sqlite_close(db)
+        res = html_error("that handle is already registered — sign in instead")
+        return
+    }
+    sub := "u_" + newid()
+    salt := to_hex(rand_bytes(16))
+    sqlite_exec(db, "INSERT INTO accounts(sub, handle, name, pass_hash, salt, kind, created_at) VALUES(?,?,?,?,?,?,?)",
+        []string{sub, handle, name, hash_password(pw, salt), salt, "human", str(now())})
+    // Consumed in the same transaction-ish step as the account it created, so a
+    // reload cannot mint a second identity.
+    sqlite_exec(db, "UPDATE invites SET used_at = ? WHERE token_hash = ?", []string{str(now()), tok_hash(token)})
+    sqlite_close(db)
+    write(2, "{\"event\":\"invite_accepted\",\"sub\":\"" + sub + "\"}\n")
+    res = ok_html(invite_done(handle))
+}
+
+func invite_form(base, token, handle, msg) (h) {
+    m := ""
+    if msg != "" { m = "<p class=err>" + html_escape(msg) + "</p>" }
+    h = "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">" +
+        "<title>Set your password — intrane</title><style>body{font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;display:grid;place-items:center;min-height:100vh;margin:0}" +
+        "form{max-width:340px;width:90%}input{width:100%;box-sizing:border-box;background:#101014;border:1px solid #1f1f26;border-radius:8px;color:#e2e8f0;padding:10px;margin:6px 0;font-family:inherit}" +
+        "button{width:100%;background:#38bdf8;color:#000;border:0;border-radius:8px;padding:10px;font-weight:600;cursor:pointer;margin-top:8px}" +
+        "h1{font-size:1.15rem}small,.err{color:#8b93a3}.err{color:#f87171}</style></head><body>" +
+        "<form method=post action=\"" + html_escape(base) + "/invite/" + html_escape(token) + "\">" +
+        "<h1>Set your password</h1><p><small>for <b>" + html_escape(handle) + "</b></small></p>" + m +
+        "<input type=password name=password placeholder=\"password (10+ characters)\" autofocus>" +
+        "<input type=password name=password2 placeholder=\"repeat it\">" +
+        "<button>Create my account</button>" +
+        "<p><small>Nobody else has seen or set this password.</small></p></form></body></html>"
+}
+
+func invite_done(handle) (h) {
+    h = "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">" +
+        "<title>Account created — intrane</title><style>body{font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;display:grid;place-items:center;min-height:100vh;margin:0;text-align:center}" +
+        "h1{font-size:1.15rem}small{color:#8b93a3}</style></head><body><div><h1>Your account is ready</h1>" +
+        "<p><small>" + html_escape(handle) + " — you can now sign in wherever this identity is accepted.</small></p></div></body></html>"
+}

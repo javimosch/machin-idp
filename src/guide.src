@@ -29,6 +29,9 @@ func llms_txt(base) (t) {
         "GET  /.well-known/openid-configuration   discovery\n" +
         "GET  /jwks                               Ed25519 public keys (OKP)\n" +
         "POST /v1/accounts {handle, password, name?, kind?}   register a principal\n" +
+        "POST /v1/agents   {handle, name?}   Bearer IDP_ADMIN_TOKEN -> mint an AGENT (kind forced; human refused). Password generated here, shown once.\n" +
+        "POST /v1/invites  {handle, name?, days?}  Bearer IDP_ADMIN_TOKEN -> an invite URL. The person sets their own password; the caller never sees or chooses it. Single use.\n" +
+        "GET|POST /invite/<token>                  the set-a-password page and its submit\n" +
         "POST /v1/clients  {name, redirect_uris}              register an OIDC client\n" +
         "GET  /authorize   (Basic auth = headless agent login, else a form)\n" +
         "POST /token       code -> {access_token, optional EdDSA id_token}\n" +
