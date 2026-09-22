@@ -130,3 +130,89 @@ func handle_agent_create(req) (res) {
     write(2, "{\"event\":\"agent_minted\",\"sub\":\"" + sub + "\"}\n")
     res = created("{\"ok\":1,\"sub\":\"" + sub + "\",\"handle\":" + json(handle) + ",\"kind\":\"agent\",\"password\":" + json(password) + ",\"note\":\"the password is shown once and is not recoverable. The agent authenticates headlessly: Authorization: Basic handle:password on /authorize.\"}")
 }
+
+// agent_admin_ok: the shared gate for the agent lifecycle endpoints. Returns
+// the opened db and the requested handle, or 0 when the caller was refused
+// (res carries the refusal).
+func agent_admin_ok(req) (db, handle, res, ok) {
+    ok = 0
+    db = 0
+    handle = ""
+    want := env("IDP_ADMIN_TOKEN")
+    if want == "" {
+        res = response("501 Not Implemented", "application/json", "{\"ok\":0,\"error\":\"agent administration is not enabled on this IdP (set IDP_ADMIN_TOKEN)\"}")
+        return
+    }
+    got := ""
+    auth := header(req, "authorization")
+    if len(auth) > 7 && substr(auth, 0, 7) == "Bearer " { got = trim(substr(auth, 7, len(auth))) }
+    if got == "" || got != want {
+        res = response("403 Forbidden", "application/json", "{\"ok\":0,\"error\":\"a valid admin token is required\"}")
+        return
+    }
+    d := db_open()
+    if d == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    if rate_allow(d, "ag:" + client_ip(req), 3600, 60) == false {
+        sqlite_close(d)
+        res = response("429 Too Many Requests", "application/json", "{\"ok\":0,\"error\":\"too many agent operations\"}")
+        return
+    }
+    hnv, hnerr := json_get(req.body, ".handle")
+    h := unq(hnv)
+    if hnerr != "" || h == "" {
+        sqlite_close(d)
+        res = bad_request("{\"ok\":0,\"error\":\"handle required\"}")
+        return
+    }
+    db = d
+    handle = h
+    ok = 1
+}
+
+// POST /v1/agents/rotate {handle} — issue a NEW password for an existing agent.
+// Without this, losing the password shown once at minting stranded the identity
+// forever: it could not be re-read, reset, or replaced.
+func handle_agent_rotate(req) (res) {
+    db, handle, gres, gok := agent_admin_ok(req)
+    if gok == 0 { res = gres  return }
+    a, exists := account_by_handle(db, handle)
+    if exists == 0 {
+        sqlite_close(db)
+        res = response("404 Not Found", "application/json", "{\"ok\":0,\"error\":\"no such handle\"}")
+        return
+    }
+    // Humans sign in with a password they chose; rotating one from an admin
+    // token would be an account takeover, so this is agents only.
+    if a.kind != "agent" {
+        sqlite_close(db)
+        res = response("403 Forbidden", "application/json", "{\"ok\":0,\"error\":\"only agent identities can be rotated here\"}")
+        return
+    }
+    password := to_hex(rand_bytes(24))
+    salt := to_hex(rand_bytes(16))
+    sqlite_exec(db, "UPDATE accounts SET pass_hash = ?, salt = ? WHERE handle = ?", []string{hash_password(password, salt), salt, handle})
+    sqlite_close(db)
+    write(2, "{\"event\":\"agent_rotated\",\"sub\":\"" + a.sub + "\"}\n")
+    res = ok_json("{\"ok\":1,\"sub\":\"" + a.sub + "\",\"handle\":" + json(handle) + ",\"kind\":\"agent\",\"password\":" + json(password) + ",\"note\":\"the previous password stopped working. This one is shown once.\"}")
+}
+
+// DELETE /v1/agents {handle} — remove an agent identity entirely.
+func handle_agent_delete(req) (res) {
+    db, handle, gres, gok := agent_admin_ok(req)
+    if gok == 0 { res = gres  return }
+    a, exists := account_by_handle(db, handle)
+    if exists == 0 {
+        sqlite_close(db)
+        res = response("404 Not Found", "application/json", "{\"ok\":0,\"error\":\"no such handle\"}")
+        return
+    }
+    if a.kind != "agent" {
+        sqlite_close(db)
+        res = response("403 Forbidden", "application/json", "{\"ok\":0,\"error\":\"only agent identities can be deleted here\"}")
+        return
+    }
+    sqlite_exec(db, "DELETE FROM accounts WHERE handle = ?", []string{handle})
+    sqlite_close(db)
+    write(2, "{\"event\":\"agent_deleted\",\"sub\":\"" + a.sub + "\"}\n")
+    res = ok_json("{\"ok\":1,\"handle\":" + json(handle) + ",\"deleted\":1}")
+}

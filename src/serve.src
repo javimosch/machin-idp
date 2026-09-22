@@ -13,6 +13,8 @@ func handle(req) (res) {
     if req.method == "POST" && p == "/v1/accounts" { res = handle_account_create(req)  return }
     if req.method == "POST" && p == "/v1/clients" { res = handle_client_create(req)  return }
     if req.method == "POST" && p == "/v1/agents" { res = handle_agent_create(req)  return }
+    if req.method == "POST" && p == "/v1/agents/rotate" { res = handle_agent_rotate(req)  return }
+    if req.method == "DELETE" && p == "/v1/agents" { res = handle_agent_delete(req)  return }
     if req.method == "POST" && p == "/v1/invites" { res = handle_invite_create(req)  return }
     if has_prefix(p, "/invite/") {
         tk := substr(p, 8, len(p))
