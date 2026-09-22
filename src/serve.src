@@ -65,5 +65,11 @@ func run_server(port) {
     set_read_timeout(15000)
     check_signing_seed_at_boot()
     write(2, "{\"event\":\"listening\",\"port\":" + str(port) + "}\n")
-    serve(port, func(req) { return handle(req) })
+    bind := env("IDP_BIND")
+    if bind == "" { bind = "127.0.0.1" }
+    if bind == "0.0.0.0" {
+        serve(port, func(req) { return handle(req) })
+    } else {
+        serve_on(bind, port, func(req) { return handle(req) })
+    }
 }
